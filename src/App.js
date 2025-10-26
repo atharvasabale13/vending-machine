@@ -1,8 +1,9 @@
-// src/App.js - Complete Vending Machine with Admin Secret Code
+// src/App.js - Complete Vending Machine with Embedded Admin
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { database } from './firebase';
 import { ref, get, update } from 'firebase/database';
 import emailjs from '@emailjs/browser';
+import Admin from './Admin'; // Import Admin component
 import './App.css';
 
 // EmailJS Configuration
@@ -33,6 +34,7 @@ const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total })
 function App() {
   // ============ STATE MANAGEMENT ============
   const [step, setStep] = useState('code-entry');
+  const [showAdmin, setShowAdmin] = useState(false); // NEW: Admin mode
   const [code, setCode] = useState('');
   const [machineId, setMachineId] = useState(null);
   const [products, setProducts] = useState([]);
@@ -66,9 +68,10 @@ function App() {
       return;
     }
 
-    // 🔐 SECRET ADMIN CODE - Redirect to Admin Panel
+    // 🔐 SECRET ADMIN CODE - Show Admin Panel
     if (code.toUpperCase() === 'ADMIN9') {
-      window.location.href = '/admin';
+      setShowAdmin(true);
+      setError('');
       return;
     }
 
@@ -534,6 +537,13 @@ Valid until: ${receipt.newCoupon.expiryDate}
     setCouponDiscount(0);
   };
 
+  // ============ ADMIN LOGOUT ============
+  const handleAdminLogout = () => {
+    setShowAdmin(false);
+    setCode('');
+    setError('');
+  };
+
   // ============ UI SCREENS ============
 
   const CodeEntryScreen = () => (
@@ -655,7 +665,6 @@ Valid until: ${receipt.newCoupon.expiryDate}
                 ))}
               </div>
 
-              {/* Coupon Section - MOBILE FIXED */}
               <div className="coupon-section">
                 <h4>🎟️ Have a Coupon?</h4>
                 {!appliedCoupon ? (
@@ -823,7 +832,6 @@ Valid until: ${receipt.newCoupon.expiryDate}
           <p>Please collect them from the collection area.</p>
         </div>
 
-        {/* Email Section - MOBILE FIXED */}
         <div className="email-section">
           <h4>📧 Email Receipt</h4>
           <div className="email-input-group">
@@ -885,11 +893,18 @@ Valid until: ${receipt.newCoupon.expiryDate}
     </div>
   );
 
+  // ============ MAIN RENDER ============
   return (
     <div className="app">
-      {step === 'code-entry' && <CodeEntryScreen />}
-      {step === 'product-selection' && <ProductSelectionScreen />}
-      {step === 'receipt' && <ReceiptScreen />}
+      {showAdmin ? (
+        <Admin onLogout={handleAdminLogout} />
+      ) : (
+        <>
+          {step === 'code-entry' && <CodeEntryScreen />}
+          {step === 'product-selection' && <ProductSelectionScreen />}
+          {step === 'receipt' && <ReceiptScreen />}
+        </>
+      )}
     </div>
   );
 }
