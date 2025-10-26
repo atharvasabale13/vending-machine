@@ -1,10 +1,9 @@
-// src/App.js - Complete Vending Machine with Mobile Keyboard Fix
+// src/App.js - Complete Vending Machine with Admin Secret Code
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { database } from './firebase';
 import { ref, get, update } from 'firebase/database';
 import emailjs from '@emailjs/browser';
 import './App.css';
-
 
 // EmailJS Configuration
 const EMAILJS_SERVICE_ID = 'service_goajbuw';
@@ -60,10 +59,16 @@ function App() {
     }
   }, []);
 
-  // ============ CODE VERIFICATION ============
+  // ============ CODE VERIFICATION (WITH ADMIN SECRET CODE) ============
   const verifyCode = async () => {
     if (code.length !== 6) {
       setError('Please enter a 6-character code');
+      return;
+    }
+
+    // 🔐 SECRET ADMIN CODE - Redirect to Admin Panel
+    if (code.toUpperCase() === 'ADMIN9') {
+      window.location.href = '/admin';
       return;
     }
 
@@ -424,53 +429,52 @@ function App() {
   };
 
   // ============ EMAIL RECEIPT ============
-  // ============ EMAIL RECEIPT ============
-const sendReceiptEmail = async () => {
-  const emailToSend = emailInputRef.current?.value || userEmail;
-  
-  if (!emailToSend || !/\S+@\S+\.\S+/.test(emailToSend)) {
-    alert('Please enter a valid email address');
-    return;
-  }
+  const sendReceiptEmail = async () => {
+    const emailToSend = emailInputRef.current?.value || userEmail;
+    
+    if (!emailToSend || !/\S+@\S+\.\S+/.test(emailToSend)) {
+      alert('Please enter a valid email address');
+      return;
+    }
 
-  try {
-    const itemsHtml = receipt?.items.map(item => `
-      <tr>
-        <td>${item.image} ${item.name}</td>
-        <td style="text-align: center;">${item.quantity}</td>
-        <td style="text-align: right;">₹${item.price}</td>
-        <td style="text-align: right;">₹${item.price * item.quantity}</td>
-      </tr>
-    `).join('');
+    try {
+      const itemsHtml = receipt?.items.map(item => `
+        <tr>
+          <td>${item.image} ${item.name}</td>
+          <td style="text-align: center;">${item.quantity}</td>
+          <td style="text-align: right;">₹${item.price}</td>
+          <td style="text-align: right;">₹${item.price * item.quantity}</td>
+        </tr>
+      `).join('');
 
-    const templateParams = {
-      user_name: 'Valued Customer',
-      to_email: emailToSend,
-      transaction_id: receipt?.transactionId,
-      date: receipt?.date,
-      machine_id: receipt?.machineId,
-      items_html: itemsHtml,
-      total_amount: receipt?.totalAmount,
-      payment_method: receipt?.paymentMethod
-    };
+      const templateParams = {
+        user_name: 'Valued Customer',
+        to_email: emailToSend,
+        reply_to: emailToSend,
+        user_email: emailToSend,
+        transaction_id: receipt?.transactionId,
+        date: receipt?.date,
+        machine_id: receipt?.machineId,
+        items_html: itemsHtml,
+        total_amount: receipt?.totalAmount,
+        payment_method: receipt?.paymentMethod
+      };
 
-    // Updated syntax for @emailjs/browser v4.x
-    await emailjs.send(
-      EMAILJS_SERVICE_ID,
-      EMAILJS_TEMPLATE_ID,
-      templateParams,
-      EMAILJS_PUBLIC_KEY
-    );
+      await emailjs.send(
+        EMAILJS_SERVICE_ID,
+        EMAILJS_TEMPLATE_ID,
+        templateParams,
+        EMAILJS_PUBLIC_KEY
+      );
 
-    setUserEmail(emailToSend);
-    setEmailSent(true);
-    alert('Receipt sent to your email successfully! 📧');
-  } catch (error) {
-    console.error('Email send failed:', error);
-    alert('Failed to send email. Please try again.');
-  }
-};
-
+      setUserEmail(emailToSend);
+      setEmailSent(true);
+      alert('Receipt sent to your email successfully! 📧');
+    } catch (error) {
+      console.error('Email send failed:', error);
+      alert('Failed to send email. Please try again.');
+    }
+  };
 
   // ============ DOWNLOAD RECEIPT ============
   const downloadReceipt = () => {
@@ -562,6 +566,7 @@ Valid until: ${receipt.newCoupon.expiryDate}
 
         <div className="help-text">
           <p>👉 Press the button on the vending machine to get your code</p>
+          <p style={{fontSize: '12px', opacity: 0.5, marginTop: '10px'}}>💡 Admin? Enter ADMIN9</p>
         </div>
       </div>
     </div>
