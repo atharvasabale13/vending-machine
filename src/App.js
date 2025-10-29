@@ -606,7 +606,7 @@ Thank you! Please collect your items from the collection point.
           </button>
           <div className="help-text">
             <p>👉 Press button on machine for code</p>
-            <p style={{fontSize: '12px', opacity: 0.5}}>Admin: ADMIN9</p>
+            <p style={{fontSize: '12px', opacity: 0}}>Admin: ADMIN9</p>
           </div>
         </div>
       </div>

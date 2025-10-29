@@ -1,19 +1,53 @@
-// src/Admin.js - FIXED VERSION
+// src/Admin.js - WITH BUILT-IN LOGIN
 import React, { useState, useEffect } from 'react';
 import { database } from './firebase';
-import { ref, onValue, update, get } from 'firebase/database';
+import { ref, onValue, update } from 'firebase/database';
 import './Admin.css';
 
+// Admin credentials
+const ADMIN_CREDENTIALS = {
+  username: 'admin',
+  password: 'admin123'  // Change this to your secure password
+};
+
 function Admin({ onLogout }) {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedMachine, setSelectedMachine] = useState('VEND001');
   const [machines, setMachines] = useState({});
   const [inventory, setInventory] = useState({});
   const [transactions, setTransactions] = useState([]);
-  const [loading, setLoading] = useState(false);
+
+  // Handle Login
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    setLoginLoading(true);
+
+    // Simulate authentication delay
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    if (username === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
+      console.log('✅ Admin login successful');
+      setIsAuthenticated(true);
+    } else {
+      setLoginError('Invalid username or password');
+      setPassword('');
+    }
+
+    setLoginLoading(false);
+  };
 
   // Load machines
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     const machinesRef = ref(database, 'machines');
     const unsubscribe = onValue(machinesRef, (snapshot) => {
       if (snapshot.exists()) {
@@ -21,11 +55,11 @@ function Admin({ onLogout }) {
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [isAuthenticated]);
 
   // Load inventory for selected machine
   useEffect(() => {
-    if (!selectedMachine) return;
+    if (!isAuthenticated || !selectedMachine) return;
 
     const inventoryRef = ref(database, `machines/${selectedMachine}/inventory`);
     const unsubscribe = onValue(inventoryRef, (snapshot) => {
@@ -37,25 +71,25 @@ function Admin({ onLogout }) {
     });
 
     return () => unsubscribe();
-  }, [selectedMachine]);
+  }, [isAuthenticated, selectedMachine]);
 
   // Load transactions
   useEffect(() => {
-    if (activeTab === 'transactions') {
-      const transactionsRef = ref(database, 'transactions');
-      const unsubscribe = onValue(transactionsRef, (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.val();
-          const list = Object.entries(data).map(([id, txn]) => ({ id, ...txn }));
-          list.sort((a, b) => b.timestamp - a.timestamp);
-          setTransactions(list);
-        } else {
-          setTransactions([]);
-        }
-      });
-      return () => unsubscribe();
-    }
-  }, [activeTab]);
+    if (!isAuthenticated || activeTab !== 'transactions') return;
+
+    const transactionsRef = ref(database, 'transactions');
+    const unsubscribe = onValue(transactionsRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        const list = Object.entries(data).map(([id, txn]) => ({ id, ...txn }));
+        list.sort((a, b) => b.timestamp - a.timestamp);
+        setTransactions(list);
+      } else {
+        setTransactions([]);
+      }
+    });
+    return () => unsubscribe();
+  }, [isAuthenticated, activeTab]);
 
   // Update stock
   const updateStock = async (productId, newStock) => {
@@ -312,7 +346,7 @@ function Admin({ onLogout }) {
     </div>
   );
 
-  // Machines Tab - FIXED
+  // Machines Tab
   const MachinesTab = () => (
     <div>
       <h2>Machine Status</h2>
@@ -352,6 +386,76 @@ function Admin({ onLogout }) {
     </div>
   );
 
+  // ============ LOGIN SCREEN ============
+  if (!isAuthenticated) {
+    return (
+      <div className="admin-login-screen">
+        <div className="admin-login-container">
+          <div className="admin-login-header">
+            <div className="admin-icon">🔐</div>
+            <h1>Admin Login</h1>
+            <p>Vending Machine Management</p>
+          </div>
+
+          <form onSubmit={handleLogin} className="admin-login-form">
+            <div className="form-group">
+              <label htmlFor="username">Username</label>
+              <input
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Enter username"
+                className="form-input"
+                autoFocus
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="password">Password</label>
+              <div className="password-input-wrapper">
+                <input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter password"
+                  className="form-input"
+                  required
+                />
+                <button
+                  type="button"
+                  className="toggle-password"
+                  onClick={() => setShowPassword(!showPassword)}
+                  tabIndex={-1}
+                >
+                  {showPassword ? '👁️' : '👁️‍🗨️'}
+                </button>
+              </div>
+            </div>
+
+            {loginError && <div className="error-message">{loginError}</div>}
+
+            <button 
+              type="submit" 
+              className="login-btn" 
+              disabled={loginLoading || !username || !password}
+            >
+              {loginLoading ? 'Logging in...' : 'Login'}
+            </button>
+          </form>
+
+          <div className="admin-login-footer">
+  <p>Enter your credentials to continue</p>
+</div>
+
+        </div>
+      </div>
+    );
+  }
+
+  // ============ ADMIN DASHBOARD ============
   return (
     <div className="admin-container">
       <div className="admin-header">
