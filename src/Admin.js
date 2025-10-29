@@ -1,414 +1,286 @@
-// src/Admin.js - Admin Dashboard
+// src/Admin.js - FIXED VERSION
 import React, { useState, useEffect } from 'react';
 import { database } from './firebase';
-import { ref, get, update, remove } from 'firebase/database';
+import { ref, onValue, update, get } from 'firebase/database';
 import './Admin.css';
 
-// Simple authentication (replace with proper auth in production)
-const ADMIN_PASSWORD = "admin123";  // CHANGE THIS!
-
-function Admin() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [password, setPassword] = useState('');
+function Admin({ onLogout }) {
   const [activeTab, setActiveTab] = useState('dashboard');
-  
-  // Dashboard data
-  const [stats, setStats] = useState({
-    totalSales: 0,
-    todaySales: 0,
-    totalRevenue: 0,
-    todayRevenue: 0,
-    lowStock: 0
-  });
+  const [selectedMachine, setSelectedMachine] = useState('VEND001');
+  const [machines, setMachines] = useState({});
+  const [inventory, setInventory] = useState({});
   const [transactions, setTransactions] = useState([]);
-  const [inventory, setInventory] = useState([]);
-  const [machines, setMachines] = useState([]);
-  const [activeSessions, setActiveSessions] = useState([]);
+  const [loading, setLoading] = useState(false);
 
-  // ============ AUTHENTICATION ============
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (password === ADMIN_PASSWORD) {
-      setIsAuthenticated(true);
-      loadDashboardData();
-    } else {
-      alert('Invalid password!');
-    }
-  };
+  // Load machines
+  useEffect(() => {
+    const machinesRef = ref(database, 'machines');
+    const unsubscribe = onValue(machinesRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setMachines(snapshot.val());
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
-  const handleLogout = () => {
-    setIsAuthenticated(false);
-    setPassword('');
-  };
+  // Load inventory for selected machine
+  useEffect(() => {
+    if (!selectedMachine) return;
 
-  // ============ DATA LOADING ============
-  const loadDashboardData = async () => {
-    await Promise.all([
-      loadTransactions(),
-      loadInventory(),
-      loadMachines(),
-      loadActiveSessions()
-    ]);
-  };
+    const inventoryRef = ref(database, `machines/${selectedMachine}/inventory`);
+    const unsubscribe = onValue(inventoryRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setInventory(snapshot.val());
+      } else {
+        setInventory({});
+      }
+    });
 
-  const loadTransactions = async () => {
-    try {
+    return () => unsubscribe();
+  }, [selectedMachine]);
+
+  // Load transactions
+  useEffect(() => {
+    if (activeTab === 'transactions') {
       const transactionsRef = ref(database, 'transactions');
-      const snapshot = await get(transactionsRef);
-      
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const transactionList = Object.keys(data).map(key => ({
-          id: key,
-          ...data[key]
-        })).sort((a, b) => b.timestamp - a.timestamp);
-        
-        setTransactions(transactionList);
-        calculateStats(transactionList);
-      }
-    } catch (error) {
-      console.error('Error loading transactions:', error);
+      const unsubscribe = onValue(transactionsRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.val();
+          const list = Object.entries(data).map(([id, txn]) => ({ id, ...txn }));
+          list.sort((a, b) => b.timestamp - a.timestamp);
+          setTransactions(list);
+        } else {
+          setTransactions([]);
+        }
+      });
+      return () => unsubscribe();
     }
-  };
+  }, [activeTab]);
 
-  const loadInventory = async () => {
-    try {
-      const inventoryRef = ref(database, 'machines/VEND001/inventory');
-      const snapshot = await get(inventoryRef);
-      
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const inventoryList = Object.keys(data).map(key => ({
-          id: key,
-          ...data[key]
-        }));
-        setInventory(inventoryList);
-      }
-    } catch (error) {
-      console.error('Error loading inventory:', error);
-    }
-  };
-
-  const loadMachines = async () => {
-    try {
-      const machinesRef = ref(database, 'machines');
-      const snapshot = await get(machinesRef);
-      
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const machineList = Object.keys(data).map(key => ({
-          id: key,
-          ...data[key]
-        }));
-        setMachines(machineList);
-      }
-    } catch (error) {
-      console.error('Error loading machines:', error);
-    }
-  };
-
-  const loadActiveSessions = async () => {
-    try {
-      const sessionsRef = ref(database, 'sessions');
-      const snapshot = await get(sessionsRef);
-      
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const now = Math.floor(Date.now() / 1000);
-        const activeSessions = Object.keys(data)
-          .map(key => ({ code: key, ...data[key] }))
-          .filter(session => session.status === 'active' && session.expiresAt > now);
-        setActiveSessions(activeSessions);
-      }
-    } catch (error) {
-      console.error('Error loading sessions:', error);
-    }
-  };
-
-  const calculateStats = (transactionList) => {
-    const today = new Date().setHours(0, 0, 0, 0);
-    
-    let totalSales = transactionList.length;
-    let totalRevenue = 0;
-    let todaySales = 0;
-    let todayRevenue = 0;
-    
-    transactionList.forEach(txn => {
-      totalRevenue += txn.totalAmount || 0;
-      
-      const txnDate = new Date(txn.timestamp).setHours(0, 0, 0, 0);
-      if (txnDate === today) {
-        todaySales++;
-        todayRevenue += txn.totalAmount || 0;
-      }
-    });
-    
-    const lowStock = inventory.filter(item => item.stock < 5).length;
-    
-    setStats({
-      totalSales,
-      todaySales,
-      totalRevenue,
-      todayRevenue,
-      lowStock
-    });
-  };
-
-  // ============ INVENTORY MANAGEMENT ============
+  // Update stock
   const updateStock = async (productId, newStock) => {
     try {
-      const productRef = ref(database, `machines/VEND001/inventory/${productId}`);
-      await update(productRef, { stock: parseInt(newStock) });
-      alert('Stock updated successfully!');
-      loadInventory();
+      await update(ref(database, `machines/${selectedMachine}/inventory/${productId}`), {
+        stock: Number(newStock)
+      });
     } catch (error) {
       console.error('Error updating stock:', error);
       alert('Failed to update stock');
     }
   };
 
+  // Update price
   const updatePrice = async (productId, newPrice) => {
     try {
-      const productRef = ref(database, `machines/VEND001/inventory/${productId}`);
-      await update(productRef, { price: parseInt(newPrice) });
-      alert('Price updated successfully!');
-      loadInventory();
+      await update(ref(database, `machines/${selectedMachine}/inventory/${productId}`), {
+        price: Number(newPrice)
+      });
     } catch (error) {
       console.error('Error updating price:', error);
       alert('Failed to update price');
     }
   };
 
-  // Auto-refresh data every 30 seconds
-  useEffect(() => {
-    if (isAuthenticated) {
-      const interval = setInterval(() => {
-        loadDashboardData();
-      }, 30000);
-      return () => clearInterval(interval);
-    }
-  }, [isAuthenticated]);
+  // Add stock
+  const addStock = async (productId, amount) => {
+    const currentStock = inventory[productId]?.stock || 0;
+    await updateStock(productId, currentStock + amount);
+  };
 
-  // ============ LOGIN SCREEN ============
-  if (!isAuthenticated) {
+  // Dashboard Tab
+  const DashboardTab = () => {
+    const totalProducts = Object.keys(inventory).length;
+    const totalStock = Object.values(inventory).reduce((sum, p) => sum + (p.stock || 0), 0);
+    const lowStockItems = Object.entries(inventory).filter(([_, p]) => p.stock < 5).length;
+    const totalTransactions = transactions.length;
+    const totalRevenue = transactions.reduce((sum, t) => sum + (t.totalAmount || 0), 0);
+
     return (
-      <div className="admin-login">
-        <div className="login-container">
-          <h1>🔐 Admin Login</h1>
-          <p className="login-subtitle">Vending Machine Management</p>
-          <form onSubmit={handleLogin}>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter admin password"
-              className="login-input"
-              autoFocus
-            />
-            <button type="submit" className="login-btn">
-              Login →
-            </button>
-          </form>
-          <p className="login-note">Default password: admin123</p>
+      <div>
+        <h2>Dashboard</h2>
+        <div className="stats-grid">
+          <div className="stat-card">
+            <div className="stat-icon">📦</div>
+            <div className="stat-info">
+              <div className="stat-value">{totalProducts}</div>
+              <div className="stat-label">Products</div>
+            </div>
+          </div>
+          
+          <div className="stat-card">
+            <div className="stat-icon">📊</div>
+            <div className="stat-info">
+              <div className="stat-value">{totalStock}</div>
+              <div className="stat-label">Total Stock</div>
+            </div>
+          </div>
+          
+          <div className="stat-card">
+            <div className="stat-icon">⚠️</div>
+            <div className="stat-info">
+              <div className="stat-value">{lowStockItems}</div>
+              <div className="stat-label">Low Stock</div>
+            </div>
+          </div>
+          
+          <div className="stat-card">
+            <div className="stat-icon">💰</div>
+            <div className="stat-info">
+              <div className="stat-value">₹{totalRevenue.toFixed(2)}</div>
+              <div className="stat-label">Revenue</div>
+            </div>
+          </div>
         </div>
-      </div>
-    );
-  }
 
-  // ============ DASHBOARD SCREENS ============
-  
-  const DashboardTab = () => (
-    <div className="tab-content">
-      <h2>Dashboard Overview</h2>
-      
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-icon">📊</div>
-          <div className="stat-info">
-            <h3>Today's Sales</h3>
-            <p className="stat-value">{stats.todaySales}</p>
-            <p className="stat-label">transactions</p>
-          </div>
-        </div>
-        
-        <div className="stat-card">
-          <div className="stat-icon">💰</div>
-          <div className="stat-info">
-            <h3>Today's Revenue</h3>
-            <p className="stat-value">₹{stats.todayRevenue}</p>
-            <p className="stat-label">collected</p>
-          </div>
-        </div>
-        
-        <div className="stat-card">
-          <div className="stat-icon">📈</div>
-          <div className="stat-info">
-            <h3>Total Sales</h3>
-            <p className="stat-value">{stats.totalSales}</p>
-            <p className="stat-label">all time</p>
-          </div>
-        </div>
-        
-        <div className="stat-card">
-          <div className="stat-icon">⚠️</div>
-          <div className="stat-info">
-            <h3>Low Stock Items</h3>
-            <p className="stat-value">{stats.lowStock}</p>
-            <p className="stat-label">need restock</p>
-          </div>
-        </div>
-      </div>
-
-      <div className="dashboard-sections">
-        <div className="section">
+        <div style={{marginTop: '30px'}}>
           <h3>Recent Transactions</h3>
           <div className="transactions-list">
             {transactions.slice(0, 5).map(txn => (
               <div key={txn.id} className="transaction-item">
-                <div className="txn-info">
-                  <strong>{txn.transactionId?.slice(0, 15)}...</strong>
-                  <span>{txn.date}</span>
+                <div>
+                  <strong>{txn.transactionId}</strong>
+                  <div style={{fontSize: '12px', color: '#999'}}>{txn.date}</div>
                 </div>
-                <div className="txn-amount">₹{txn.totalAmount}</div>
+                <div style={{textAlign: 'right'}}>
+                  <strong>₹{txn.totalAmount?.toFixed(2)}</strong>
+                  <div style={{fontSize: '12px', color: '#4caf50'}}>Completed</div>
+                </div>
               </div>
             ))}
           </div>
         </div>
-
-        <div className="section">
-          <h3>Active Sessions</h3>
-          {activeSessions.length > 0 ? (
-            <div className="sessions-list">
-              {activeSessions.map(session => (
-                <div key={session.code} className="session-item">
-                  <strong>{session.code}</strong>
-                  <span>Expires: {new Date(session.expiresAt * 1000).toLocaleTimeString()}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="empty-message">No active sessions</p>
-          )}
-        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
-  const generateTestCode = async () => {
-  const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < 6; i++) {
-    code += characters.charAt(Math.floor(Math.random() * characters.length));
-  }
-  
-  const currentTime = Math.floor(Date.now() / 1000);
-  const expiryTime = currentTime + 300; // 5 minutes
-  
-  try {
-    await update(ref(database, `sessions/${code}`), {
-      code: code,
-      machineId: 'VEND001',
-      status: 'active',
-      createdAt: currentTime,
-      expiresAt: expiryTime
-    });
-    
-    alert(`Test Code Generated: ${code}\n\nValid for 5 minutes.`);
-  } catch (error) {
-    console.error('Error generating test code:', error);
-    alert('Failed to generate test code');
-  }
-};
+  // Inventory Tab
+  const InventoryTab = () => {
+    const [editingPrice, setEditingPrice] = useState(null);
+    const [editingStock, setEditingStock] = useState(null);
 
-// Add this button to DashboardTab component
-<button onClick={generateTestCode} className="action-btn">
-  🧪 Generate Test Code
-</button>
+    return (
+      <div>
+        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px'}}>
+          <h2>Inventory Management</h2>
+          <button onClick={() => window.location.reload()} className="refresh-btn">
+            🔄 Refresh
+          </button>
+        </div>
 
+        <div style={{marginBottom: '20px'}}>
+          <label>Machine: </label>
+          <select 
+            value={selectedMachine} 
+            onChange={(e) => setSelectedMachine(e.target.value)}
+            style={{padding: '8px', borderRadius: '4px', border: '1px solid #ddd'}}
+          >
+            {Object.keys(machines).map(machineId => (
+              <option key={machineId} value={machineId}>{machineId}</option>
+            ))}
+          </select>
+        </div>
 
-
-
-
-  const InventoryTab = () => (
-    <div className="tab-content">
-      <h2>Inventory Management</h2>
-      <button onClick={loadInventory} className="refresh-btn">🔄 Refresh</button>
-      
-      <table className="admin-table">
-        <thead>
-          <tr>
-            <th>Product</th>
-            <th>Price</th>
-            <th>Stock</th>
-            <th>Status</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {inventory.map(product => (
-            <tr key={product.id}>
-              <td>
-                <div className="product-cell">
-                  <span className="product-emoji">{product.image}</span>
-                  <strong>{product.name}</strong>
-                </div>
-              </td>
-              <td>
-                <input
-                  type="number"
-                  defaultValue={product.price}
-                  onBlur={(e) => {
-                    if (e.target.value !== product.price.toString()) {
-                      updatePrice(product.id, e.target.value);
-                    }
-                  }}
-                  className="inline-input"
-                  style={{width: '80px'}}
-                />
-              </td>
-              <td>
-                <input
-                  type="number"
-                  defaultValue={product.stock}
-                  onBlur={(e) => {
-                    if (e.target.value !== product.stock.toString()) {
-                      updateStock(product.id, e.target.value);
-                    }
-                  }}
-                  className="inline-input"
-                  style={{width: '80px'}}
-                />
-              </td>
-              <td>
-                <span className={`status-badge ${product.stock < 5 ? 'low' : 'ok'}`}>
-                  {product.stock < 5 ? 'Low Stock' : 'In Stock'}
-                </span>
-              </td>
-              <td>
-                <button 
-                  onClick={() => updateStock(product.id, product.stock + 10)}
-                  className="action-btn"
-                >
-                  +10 Stock
-                </button>
-              </td>
+        <table className="inventory-table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Price</th>
+              <th>Stock</th>
+              <th>Status</th>
+              <th>Actions</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+          </thead>
+          <tbody>
+            {Object.entries(inventory).map(([productId, product]) => (
+              <tr key={productId}>
+                <td>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '10px'}}>
+                    <span style={{fontSize: '24px'}}>{product.image || '📦'}</span>
+                    <strong>{product.name || 'Unnamed'}</strong>
+                  </div>
+                </td>
+                <td>
+                  {editingPrice === productId ? (
+                    <input
+                      type="number"
+                      defaultValue={product.price}
+                      onBlur={(e) => {
+                        updatePrice(productId, e.target.value);
+                        setEditingPrice(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          updatePrice(productId, e.target.value);
+                          setEditingPrice(null);
+                        }
+                      }}
+                      autoFocus
+                      style={{width: '80px', padding: '4px'}}
+                    />
+                  ) : (
+                    <span onClick={() => setEditingPrice(productId)} style={{cursor: 'pointer'}}>
+                      ₹{product.price || 0}
+                    </span>
+                  )}
+                </td>
+                <td>
+                  {editingStock === productId ? (
+                    <input
+                      type="number"
+                      defaultValue={product.stock}
+                      onBlur={(e) => {
+                        updateStock(productId, e.target.value);
+                        setEditingStock(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          updateStock(productId, e.target.value);
+                          setEditingStock(null);
+                        }
+                      }}
+                      autoFocus
+                      style={{width: '80px', padding: '4px'}}
+                    />
+                  ) : (
+                    <span onClick={() => setEditingStock(productId)} style={{cursor: 'pointer'}}>
+                      {product.stock || 0}
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <span className={`status-badge ${product.stock > 5 ? 'in-stock' : 'low-stock'}`}>
+                    {product.stock > 5 ? 'In Stock' : 'Low Stock'}
+                  </span>
+                </td>
+                <td>
+                  <button onClick={() => addStock(productId, 10)} className="stock-btn">
+                    +10 Stock
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
 
+        {Object.keys(inventory).length === 0 && (
+          <div style={{textAlign: 'center', padding: '40px', color: '#999'}}>
+            No inventory found for {selectedMachine}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Transactions Tab
   const TransactionsTab = () => (
-    <div className="tab-content">
-      <h2>All Transactions</h2>
-      <button onClick={loadTransactions} className="refresh-btn">🔄 Refresh</button>
-      
-      <table className="admin-table">
+    <div>
+      <h2>Transaction History</h2>
+      <table className="inventory-table">
         <thead>
           <tr>
             <th>Transaction ID</th>
-            <th>Date & Time</th>
+            <th>Date</th>
+            <th>Machine</th>
             <th>Items</th>
             <th>Amount</th>
             <th>Status</th>
@@ -417,78 +289,100 @@ function Admin() {
         <tbody>
           {transactions.map(txn => (
             <tr key={txn.id}>
-              <td><code>{txn.transactionId?.slice(0, 20)}...</code></td>
+              <td><strong>{txn.transactionId}</strong></td>
               <td>{txn.date}</td>
+              <td>{txn.machineId}</td>
+              <td>{txn.items?.length || 0} items</td>
+              <td>₹{txn.totalAmount?.toFixed(2)}</td>
               <td>
-                {txn.items?.map(item => `${item.name} x${item.quantity}`).join(', ')}
-              </td>
-              <td><strong>₹{txn.totalAmount}</strong></td>
-              <td>
-                <span className="status-badge ok">{txn.status}</span>
+                <span className="status-badge in-stock">
+                  {txn.status || 'Completed'}
+                </span>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
-    </div>
-  );
 
-  const MachinesTab = () => (
-    <div className="tab-content">
-      <h2>Machine Status</h2>
-      <button onClick={loadMachines} className="refresh-btn">🔄 Refresh</button>
-      
-      {machines.map(machine => (
-        <div key={machine.id} className="machine-card">
-          <div className="machine-header">
-            <h3>🏪 {machine.id}</h3>
-            <span className={`status-badge ${machine.status === 'online' ? 'ok' : 'low'}`}>
-              {machine.status}
-            </span>
-          </div>
-          <div className="machine-details">
-            <p><strong>Location:</strong> {machine.location || 'N/A'}</p>
-            <p><strong>Last Online:</strong> {new Date(machine.lastOnline * 1000).toLocaleString()}</p>
-          </div>
+      {transactions.length === 0 && (
+        <div style={{textAlign: 'center', padding: '40px', color: '#999'}}>
+          No transactions found
         </div>
-      ))}
+      )}
     </div>
   );
 
-  // ============ MAIN ADMIN UI ============
+  // Machines Tab - FIXED
+  const MachinesTab = () => (
+    <div>
+      <h2>Machine Status</h2>
+      <div className="machines-grid">
+        {Object.entries(machines).map(([machineId, machine]) => {
+          const isOnline = machine.status?.online || false;
+          const lastHeartbeat = machine.status?.lastHeartbeat || 0;
+          
+          return (
+            <div key={machineId} className="machine-card">
+              <div className="machine-header">
+                <h3>{machineId}</h3>
+                <span className={`status-badge ${isOnline ? 'in-stock' : 'low-stock'}`}>
+                  {isOnline ? '🟢 Online' : '🔴 Offline'}
+                </span>
+              </div>
+              <div className="machine-info">
+                <p><strong>Name:</strong> {machine.name || 'N/A'}</p>
+                <p><strong>Location:</strong> {machine.location || 'N/A'}</p>
+                <p><strong>Products:</strong> {Object.keys(machine.inventory || {}).length}</p>
+                <p><strong>Last Heartbeat:</strong> {
+                  lastHeartbeat 
+                    ? new Date(lastHeartbeat * 1000).toLocaleString('en-IN')
+                    : 'Never'
+                }</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {Object.keys(machines).length === 0 && (
+        <div style={{textAlign: 'center', padding: '40px', color: '#999'}}>
+          No machines found
+        </div>
+      )}
+    </div>
+  );
+
   return (
-    <div className="admin-dashboard">
+    <div className="admin-container">
       <div className="admin-header">
-        <h1>🏪 Vending Machine Admin</h1>
-        <button onClick={handleLogout} className="logout-btn">
-          Logout →
-        </button>
+        <h1>🏪 Admin Dashboard</h1>
+        <button onClick={onLogout} className="logout-btn">Logout</button>
       </div>
 
       <div className="admin-tabs">
         <button 
-          className={activeTab === 'dashboard' ? 'active' : ''}
+          className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
           onClick={() => setActiveTab('dashboard')}
         >
           📊 Dashboard
         </button>
         <button 
-          className={activeTab === 'inventory' ? 'active' : ''}
+          className={`tab-btn ${activeTab === 'inventory' ? 'active' : ''}`}
           onClick={() => setActiveTab('inventory')}
         >
           📦 Inventory
         </button>
         <button 
-          className={activeTab === 'transactions' ? 'active' : ''}
+          className={`tab-btn ${activeTab === 'transactions' ? 'active' : ''}`}
           onClick={() => setActiveTab('transactions')}
         >
           💳 Transactions
         </button>
         <button 
-          className={activeTab === 'machines' ? 'active' : ''}
+          className={`tab-btn ${activeTab === 'machines' ? 'active' : ''}`}
           onClick={() => setActiveTab('machines')}
         >
-          🤖 Machines
+          🖥️ Machines
         </button>
       </div>
 

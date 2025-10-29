@@ -1,22 +1,24 @@
-// src/App.js - Fixed version with no reloading and real-time sync
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+// src/App.js - FINAL VERSION WITH COLLECTION MESSAGE & 7-DAY COUPON
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { database } from './firebase';
-import { ref, get, update, onValue } from 'firebase/database';
+import { ref, get, set, update, onValue } from 'firebase/database';
 import emailjs from '@emailjs/browser';
 import Admin from './Admin';
 import './App.css';
 
-// EmailJS Configuration
+// Configuration
 const EMAILJS_SERVICE_ID = 'service_goajbuw';
 const EMAILJS_TEMPLATE_ID = 'template_qwa3s96';
 const EMAILJS_PUBLIC_KEY = 'SdaFtoVQpifXFXcp1';
-
-// Razorpay Configuration
 const RAZORPAY_KEY_ID = 'rzp_test_RYR6kqiYhpWDq0';
 
-// Load Razorpay script
+// Utility: Load Razorpay
 const loadRazorpayScript = () => {
   return new Promise((resolve) => {
+    if (window.Razorpay) {
+      resolve(true);
+      return;
+    }
     const script = document.createElement('script');
     script.src = 'https://checkout.razorpay.com/v1/checkout.js';
     script.onload = () => resolve(true);
@@ -25,8 +27,8 @@ const loadRazorpayScript = () => {
   });
 };
 
-// ============ COUNTDOWN TIMER COMPONENT ============
-const CountdownTimer = React.memo(({ expiresAt, onExpire }) => {
+// ============ COUNTDOWN TIMER ============
+const CountdownTimer = ({ expiresAt, onExpire }) => {
   const [timeLeft, setTimeLeft] = useState(null);
 
   useEffect(() => {
@@ -45,11 +47,7 @@ const CountdownTimer = React.memo(({ expiresAt, onExpire }) => {
     };
 
     setTimeLeft(calculateTimeLeft());
-
-    const timer = setInterval(() => {
-      setTimeLeft(calculateTimeLeft());
-    }, 1000);
-
+    const timer = setInterval(() => setTimeLeft(calculateTimeLeft()), 1000);
     return () => clearInterval(timer);
   }, [expiresAt, onExpire]);
 
@@ -60,31 +58,21 @@ const CountdownTimer = React.memo(({ expiresAt, onExpire }) => {
 
   return (
     <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '8px',
-      padding: '12px 20px',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+      padding: '12px 20px', borderRadius: '12px', fontWeight: 'bold', fontSize: '16px',
+      margin: '15px 0', boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
       background: isVeryLowTime ? '#ff5252' : isLowTime ? '#ff9800' : '#4caf50',
-      color: 'white',
-      borderRadius: '12px',
-      fontWeight: 'bold',
-      fontSize: '16px',
-      margin: '15px 0',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-      animation: isVeryLowTime ? 'pulse 1s infinite' : 'none'
+      color: 'white', animation: isVeryLowTime ? 'pulse 1s infinite' : 'none'
     }}>
       <span style={{fontSize: '20px'}}>⏱️</span>
-      <span>
-        {timeLeft.minutes}:{timeLeft.seconds.toString().padStart(2, '0')}
-      </span>
+      <span>{timeLeft.minutes}:{timeLeft.seconds.toString().padStart(2, '0')}</span>
       <span style={{fontSize: '14px', opacity: 0.9}}>remaining</span>
     </div>
   );
-});
+};
 
-// Memoized Price Breakdown Component
-const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total }) => (
+// ============ PRICE BREAKDOWN ============
+const PriceBreakdown = ({ subtotal, appliedCoupon, discount, total }) => (
   <div className="price-breakdown">
     <div className="price-row">
       <span>Subtotal:</span>
@@ -92,7 +80,7 @@ const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total })
     </div>
     {appliedCoupon && (
       <div className="price-row discount-row">
-        <span>Coupon Discount ({appliedCoupon.discount}%):</span>
+        <span>Coupon ({appliedCoupon.discount}%):</span>
         <span>-₹{discount.toFixed(2)}</span>
       </div>
     )}
@@ -101,10 +89,11 @@ const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total })
       <strong>₹{total.toFixed(2)}</strong>
     </div>
   </div>
-));
+);
 
+// ============ MAIN APP COMPONENT ============
 function App() {
-  // ============ STATE MANAGEMENT ============
+  // State
   const [step, setStep] = useState('code-entry');
   const [showAdmin, setShowAdmin] = useState(false);
   const [code, setCode] = useState('');
@@ -116,141 +105,106 @@ function App() {
   const [receipt, setReceipt] = useState(null);
   const [userEmail, setUserEmail] = useState('');
   const [emailSent, setEmailSent] = useState(false);
-  
-  // Coupon states
   const [couponCode, setCouponCode] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState(null);
   const [couponDiscount, setCouponDiscount] = useState(0);
-
-  // Timer states
   const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
   const [codeExpiresAt, setCodeExpiresAt] = useState(null);
 
   // Refs
   const couponInputRef = useRef(null);
   const emailInputRef = useRef(null);
-  const inventoryListenerRef = useRef(null);
+  const unsubscribeRef = useRef(null);
 
-  // ============ INITIALIZATION ============
+  // Initialize
   useEffect(() => {
     console.log('🚀 App initialized');
     loadRazorpayScript();
-    
     if ('scrollRestoration' in window.history) {
       window.history.scrollRestoration = 'manual';
     }
-
+    
     return () => {
-      console.log('🧹 Cleanup on unmount');
-      // Clean up inventory listener
-      if (inventoryListenerRef.current) {
-        inventoryListenerRef.current();
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
       }
     };
   }, []);
 
-  // ============ REAL-TIME INVENTORY SYNC ============
+  // ============ INVENTORY REAL-TIME LISTENER ============
   useEffect(() => {
-    if (machineId && step === 'product-selection') {
-      console.log('👂 Setting up real-time inventory listener for:', machineId);
-      
-      const inventoryRef = ref(database, `machines/${machineId}/inventory`);
-      
-      // Listen for real-time updates
-      const unsubscribe = onValue(inventoryRef, (snapshot) => {
-        if (snapshot.exists()) {
-          const productsData = snapshot.val();
-          console.log('🔄 Inventory updated from Firebase');
-          
-          const productList = Object.keys(productsData).map(key => ({
-            id: key,
-            ...productsData[key]
-          }));
-          
-          // Update products with available stock
-          const availableProducts = productList.filter(p => p.stock > 0);
-          setProducts(availableProducts);
-          
-          // Update cart quantities if stock changed
-          setCart(prevCart => 
-            prevCart.map(item => {
-              const updatedProduct = productList.find(p => p.id === item.id);
-              if (updatedProduct && item.quantity > updatedProduct.stock) {
-                console.log(`⚠️ Adjusting ${item.name} quantity from ${item.quantity} to ${updatedProduct.stock}`);
-                return { ...item, quantity: updatedProduct.stock };
-              }
-              return item;
-            }).filter(item => item.quantity > 0) // Remove items with 0 stock
-          );
-        }
-      });
-
-      // Store unsubscribe function
-      inventoryListenerRef.current = unsubscribe;
-
-      // Cleanup listener when component unmounts or machineId changes
-      return () => {
-        console.log('🛑 Cleaning up inventory listener');
-        unsubscribe();
-      };
-    }
-  }, [machineId, step]);
-
-  // Check code expiry
-  const checkCodeExpiry = useCallback(async (codeToCheck) => {
-    if (codeToCheck.length !== 6) {
-      setCodeExpiresAt(null);
+    if (!machineId || step !== 'product-selection') {
+      console.log('⏸️ Skipping inventory setup:', { machineId, step });
       return;
     }
 
-    try {
-      const sessionRef = ref(database, `sessions/${codeToCheck.toUpperCase()}`);
-      const snapshot = await get(sessionRef);
+    console.log('🔌 Setting up inventory listener for:', machineId);
+    const inventoryPath = `machines/${machineId}/inventory`;
+    const inventoryRef = ref(database, inventoryPath);
 
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const currentTime = Math.floor(Date.now() / 1000);
-
-        if (data.status === 'active' && data.expiresAt > currentTime) {
-          setCodeExpiresAt(data.expiresAt);
-          setError('');
-        } else if (data.expiresAt <= currentTime) {
-          setCodeExpiresAt(null);
-          setError('Code has expired');
+    const unsubscribe = onValue(
+      inventoryRef,
+      (snapshot) => {
+        console.log('📦 Inventory snapshot received');
+        
+        if (snapshot.exists()) {
+          const data = snapshot.val();
+          console.log('📊 Raw data:', data);
+          
+          const productArray = Object.entries(data).map(([id, product]) => ({
+            id,
+            name: product.name || 'Unnamed',
+            price: Number(product.price) || 0,
+            stock: Number(product.stock) || 0,
+            image: product.image || '📦'
+          }));
+          
+          console.log('✅ Processed products:', productArray);
+          
+          const available = productArray.filter(p => p.stock > 0);
+          console.log('✅ Available (stock > 0):', available);
+          
+          setProducts(available);
+          
+          setCart(prevCart => {
+            const updated = prevCart.map(cartItem => {
+              const product = productArray.find(p => p.id === cartItem.id);
+              if (product && cartItem.quantity > product.stock) {
+                console.log(`⚠️ Reducing ${cartItem.name}: ${cartItem.quantity} → ${product.stock}`);
+                return { ...cartItem, quantity: product.stock, stock: product.stock };
+              }
+              return product ? { ...cartItem, stock: product.stock } : cartItem;
+            }).filter(item => item.quantity > 0 && item.stock > 0);
+            return updated;
+          });
         } else {
-          setCodeExpiresAt(null);
-          setError('Code already used');
+          console.warn('⚠️ No data at:', inventoryPath);
+          setProducts([]);
         }
-      } else {
-        setCodeExpiresAt(null);
+      },
+      (error) => {
+        console.error('❌ Firebase error:', error);
+        setProducts([]);
       }
-    } catch (err) {
-      console.error('Error checking code:', err);
-    }
-  }, []);
+    );
 
-  // Debounced code check
-  useEffect(() => {
-    if (code.length === 6 && step === 'code-entry') {
-      const timer = setTimeout(() => {
-        checkCodeExpiry(code);
-      }, 500);
+    unsubscribeRef.current = unsubscribe;
 
-      return () => clearTimeout(timer);
-    } else {
-      setCodeExpiresAt(null);
-    }
-  }, [code, step, checkCodeExpiry]);
+    return () => {
+      console.log('🧹 Cleaning up inventory listener');
+      unsubscribe();
+    };
+  }, [machineId, step]);
 
   // ============ CODE VERIFICATION ============
-  const verifyCode = useCallback(async () => {
+  const verifyCode = async () => {
     if (code.length !== 6) {
       setError('Please enter a 6-character code');
       return;
     }
 
     if (code.toUpperCase() === 'ADMIN9') {
-      console.log('🔐 Admin access granted');
+      console.log('🔐 Admin access');
       setShowAdmin(true);
       setError('');
       return;
@@ -263,509 +217,348 @@ function App() {
       const sessionRef = ref(database, `sessions/${code.toUpperCase()}`);
       const snapshot = await get(sessionRef);
 
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const currentTime = Math.floor(Date.now() / 1000);
-
-        if (data.status === 'active' && data.expiresAt > currentTime) {
-          await update(sessionRef, {
-            isLoggedIn: true,
-            loginTime: currentTime
-          });
-          
-          console.log('✅ Session validated');
-          
-          setMachineId(data.machineId);
-          setSessionExpiresAt(data.expiresAt);
-          setStep('product-selection');
-        } else if (data.expiresAt <= currentTime) {
-          setError('Code has expired. Please generate a new code from the machine.');
-          setCodeExpiresAt(null);
-        } else {
-          setError('Code has already been used or is invalid.');
-          setCodeExpiresAt(null);
-        }
-      } else {
+      if (!snapshot.exists()) {
         setError('Invalid code. Please check and try again.');
-        setCodeExpiresAt(null);
+        setLoading(false);
+        return;
       }
+
+      const data = snapshot.val();
+      console.log('📋 Session data:', data);
+      
+      const currentTime = Math.floor(Date.now() / 1000);
+
+      if (data.status !== 'active') {
+        setError('Code already used or invalid.');
+        setLoading(false);
+        return;
+      }
+
+      if (data.expiresAt <= currentTime) {
+        setError('Code expired. Generate new code from machine.');
+        setLoading(false);
+        return;
+      }
+
+      await update(sessionRef, {
+        isLoggedIn: true,
+        loginTime: currentTime
+      });
+
+      console.log('✅ Session valid - Machine:', data.machineId);
+
+      setMachineId(data.machineId);
+      setSessionExpiresAt(data.expiresAt);
+      setStep('product-selection');
+      
     } catch (err) {
       console.error('❌ Verification error:', err);
       setError('Connection error. Please try again.');
     }
 
     setLoading(false);
-  }, [code]);
+  };
 
-  // ============ CART MANAGEMENT ============
+  // ============ CART FUNCTIONS ============
   const addToCart = useCallback((product) => {
-    setCart(prevCart => {
-      const existingItem = prevCart.find(item => item.id === product.id);
-      
-      if (existingItem) {
-        if (existingItem.quantity < product.stock) {
-          return prevCart.map(item => 
-            item.id === product.id 
-              ? { ...item, quantity: item.quantity + 1 }
-              : item
-          );
-        } else {
-          alert(`Maximum stock available: ${product.stock}`);
-          return prevCart;
+    setCart(prev => {
+      const existing = prev.find(i => i.id === product.id);
+      if (existing) {
+        if (existing.quantity >= product.stock) {
+          alert(`Max stock: ${product.stock}`);
+          return prev;
         }
-      } else {
-        return [...prevCart, { ...product, quantity: 1 }];
+        return prev.map(i => i.id === product.id ? { ...i, quantity: i.quantity + 1 } : i);
       }
+      return [...prev, { ...product, quantity: 1 }];
     });
   }, []);
 
   const removeFromCart = useCallback((productId) => {
-    setCart(prevCart => {
-      const existingItem = prevCart.find(item => item.id === productId);
-      
-      if (existingItem.quantity > 1) {
-        return prevCart.map(item => 
-          item.id === productId 
-            ? { ...item, quantity: item.quantity - 1 }
-            : item
-        );
-      } else {
-        return prevCart.filter(item => item.id !== productId);
+    setCart(prev => {
+      const existing = prev.find(i => i.id === productId);
+      if (!existing) return prev;
+      if (existing.quantity > 1) {
+        return prev.map(i => i.id === productId ? { ...i, quantity: i.quantity - 1 } : i);
       }
+      return prev.filter(i => i.id !== productId);
     });
   }, []);
 
   const getSubtotal = useCallback(() => {
-    return cart.reduce((total, item) => total + (item.price * item.quantity), 0);
+    return cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
   }, [cart]);
 
   const getTotalPrice = useCallback(() => {
-    const subtotal = getSubtotal();
-    const total = subtotal - couponDiscount;
-    return Math.round(total * 100) / 100;
+    return Math.round((getSubtotal() - couponDiscount) * 100) / 100;
   }, [getSubtotal, couponDiscount]);
 
-  // ============ COUPON MANAGEMENT ============
+  // ============ COUPON FUNCTIONS ============
   const generateCouponCode = () => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let part1 = '';
-    let part2 = '';
-    
-    for (let i = 0; i < 4; i++) {
-      part1 += chars.charAt(Math.floor(Math.random() * chars.length));
-      part2 += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    
-    return `VND-${part1}-${part2}`;
+    const gen = () => Array.from({length: 4}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    return `VND-${gen()}-${gen()}`;
   };
 
-  const saveCouponToFirebase = async (couponCode, discount = 2) => {
+  const saveCouponToFirebase = async (code, discount = 2) => {
     try {
-      const currentTime = Date.now();
-      const expiryTime = currentTime + (7 * 24 * 60 * 60 * 1000);
-      
-      const couponData = {
-        code: couponCode,
-        discount: discount,
-        createdAt: currentTime,
-        expiresAt: expiryTime,
-        expiryDate: new Date(expiryTime).toLocaleDateString('en-IN'),
-        status: 'active',
-        usedCount: 0,
-        maxUses: 1
+      const now = Date.now();
+      const expiry = now + (7 * 24 * 60 * 60 * 1000);
+      const data = {
+        code, discount, createdAt: now, expiresAt: expiry,
+        expiryDate: new Date(expiry).toLocaleDateString('en-IN'),
+        status: 'active', usedCount: 0, maxUses: 1
       };
-      
-      await update(ref(database, `coupons/${couponCode}`), couponData);
-      console.log(`✅ Coupon ${couponCode} saved to Firebase`);
-      return couponData;
+      await set(ref(database, `coupons/${code}`), data);
+      return data;
     } catch (error) {
-      console.error('Error saving coupon:', error);
+      console.error('Coupon save error:', error);
       return null;
     }
   };
 
-  const validateAndApplyCoupon = useCallback(async () => {
-    const codeToValidate = couponInputRef.current?.value?.toUpperCase() || couponCode.toUpperCase();
-    
-    if (!codeToValidate || codeToValidate.trim() === '') {
-      alert('Please enter a coupon code');
+  const validateAndApplyCoupon = async () => {
+    const code = (couponInputRef.current?.value || '').toUpperCase().trim();
+    if (!code) {
+      alert('Enter coupon code');
       return;
     }
-    
+
     setLoading(true);
-    
     try {
-      const couponRef = ref(database, `coupons/${codeToValidate}`);
-      const snapshot = await get(couponRef);
-      
+      const snapshot = await get(ref(database, `coupons/${code}`));
       if (!snapshot.exists()) {
-        alert('❌ Invalid coupon code');
+        alert('❌ Invalid coupon');
         setLoading(false);
         return;
       }
-      
-      const couponData = snapshot.val();
-      const currentTime = Date.now();
-      
-      if (couponData.expiresAt < currentTime) {
-        alert('❌ Coupon has expired');
+
+      const data = snapshot.val();
+      const now = Date.now();
+
+      if (data.expiresAt < now) {
+        alert('❌ Coupon expired');
         setLoading(false);
         return;
       }
-      
-      if (couponData.status === 'used' || couponData.usedCount >= couponData.maxUses) {
-        alert('❌ Coupon has already been used');
+
+      if (data.status === 'used' || data.usedCount >= data.maxUses) {
+        alert('❌ Already used');
         setLoading(false);
         return;
       }
-      
-      const rawDiscount = (getSubtotal() * couponData.discount) / 100;
-      const discount = Math.round(rawDiscount * 100) / 100;
-      
+
+      const discount = Math.round((getSubtotal() * data.discount) / 100 * 100) / 100;
       setCouponDiscount(discount);
-      setAppliedCoupon({
-        code: codeToValidate,
-        discount: couponData.discount,
-        discountAmount: discount
-      });
-      setCouponCode(codeToValidate);
-      alert(`✅ Coupon applied! You saved ₹${discount.toFixed(2)} (${couponData.discount}% off)`);
-      
+      setAppliedCoupon({ code, discount: data.discount, discountAmount: discount });
+      alert(`✅ Saved ₹${discount.toFixed(2)} (${data.discount}% off)`);
     } catch (error) {
-      console.error('Error validating coupon:', error);
+      console.error('Coupon error:', error);
       alert('❌ Error validating coupon');
     }
-    
     setLoading(false);
-  }, [couponCode, getSubtotal]);
+  };
 
-  const removeCoupon = useCallback(() => {
+  const removeCoupon = () => {
     setCouponCode('');
     setAppliedCoupon(null);
     setCouponDiscount(0);
-    if (couponInputRef.current) {
-      couponInputRef.current.value = '';
-    }
-  }, []);
+    if (couponInputRef.current) couponInputRef.current.value = '';
+  };
 
-  // ============ RAZORPAY PAYMENT ============
-  const proceedToPayment = useCallback(async () => {
+  // ============ PAYMENT ============
+  const proceedToPayment = async () => {
     const total = getTotalPrice();
     const amountInPaise = Math.round(total * 100);
-    const itemsList = cart.map(item => `${item.name} x${item.quantity}`).join(', ');
-
-    console.log('💳 Payment initiated:', {
-      subtotal: getSubtotal(),
-      discount: couponDiscount.toFixed(2),
-      total: total.toFixed(2),
-      amountInPaise: amountInPaise
-    });
 
     if (!window.Razorpay) {
-      alert('Payment gateway is loading. Please try again in a moment.');
+      alert('Loading payment gateway...');
       await loadRazorpayScript();
       return;
     }
 
-    try {
-      const options = {
-        key: RAZORPAY_KEY_ID,
-        amount: amountInPaise,
-        currency: 'INR',
-        name: 'Vending Machine',
-        description: `Purchase: ${itemsList}`,
-        image: '',
-        handler: async function (response) {
-          console.log('✅ Payment successful!', response);
-          setLoading(true);
-          await handlePaymentSuccess(response);
-        },
-        prefill: {
-          name: 'Customer',
-          email: userEmail || 'customer@example.com',
-          contact: ''
-        },
-        notes: {
-          machineId: machineId,
-          sessionCode: code,
-          items: itemsList,
-          amount: total.toFixed(2)
-        },
-        theme: {
-          color: '#667eea'
-        },
-        modal: {
-          ondismiss: function() {
-            console.log('Payment cancelled by user');
-          },
-          escape: true,
-          backdropclose: true,
-          confirm_close: true
-        }
-      };
+    const options = {
+      key: RAZORPAY_KEY_ID,
+      amount: amountInPaise,
+      currency: 'INR',
+      name: 'Vending Machine',
+      description: `Purchase from ${machineId}`,
+      handler: async (response) => {
+        setLoading(true);
+        await handlePaymentSuccess(response);
+      },
+      prefill: { name: 'Customer', email: userEmail || 'customer@example.com' },
+      theme: { color: '#667eea' },
+      modal: { ondismiss: () => console.log('Payment cancelled') }
+    };
 
-      const razorpayInstance = new window.Razorpay(options);
-      
-      razorpayInstance.on('payment.failed', function (response) {
-        if (!response.error.description.includes('test') && 
-            response.error.reason !== 'payment_cancelled') {
-          alert('❌ Payment failed!\n\n' + response.error.description);
-        }
-        console.log('Payment error:', response.error);
-      });
+    new window.Razorpay(options).open();
+  };
 
-      razorpayInstance.open();
-
-    } catch (error) {
-      console.error('Payment error:', error);
-      alert('Error initializing payment. Please try again.');
-      setLoading(false);
-    }
-  }, [cart, code, couponDiscount, getSubtotal, getTotalPrice, machineId, userEmail]);
-
-  // ============ PAYMENT SUCCESS HANDLER ============
   const handlePaymentSuccess = async (paymentResponse) => {
     try {
-      const transactionId = paymentResponse.razorpay_payment_id;
+      const txnId = paymentResponse.razorpay_payment_id;
       const timestamp = Date.now();
-
-      const newCouponCode = generateCouponCode();
-      const newCouponData = await saveCouponToFirebase(newCouponCode, 2);
-
-      const subtotal = Math.round(getSubtotal() * 100) / 100;
-      const discount = Math.round(couponDiscount * 100) / 100;
-      const totalAmount = Math.round(getTotalPrice() * 100) / 100;
+      const newCoupon = generateCouponCode();
+      const newCouponData = await saveCouponToFirebase(newCoupon, 2);
 
       const receiptData = {
-        transactionId: transactionId,
-        razorpayOrderId: paymentResponse.razorpay_order_id || '',
-        razorpaySignature: paymentResponse.razorpay_signature || '',
-        machineId: machineId,
-        code: code,
+        transactionId: txnId,
+        machineId, code,
         items: cart,
-        subtotal: subtotal,
-        couponUsed: appliedCoupon ? appliedCoupon.code : null,
-        couponDiscount: discount,
-        totalAmount: totalAmount,
-        timestamp: timestamp,
+        subtotal: getSubtotal(),
+        couponUsed: appliedCoupon?.code || null,
+        couponDiscount: couponDiscount,
+        totalAmount: getTotalPrice(),
+        timestamp,
         date: new Date(timestamp).toLocaleString('en-IN'),
         paymentMethod: 'Razorpay',
-        paymentStatus: 'completed',
         status: 'completed',
-        newCoupon: {
-          code: newCouponCode,
-          discount: 2,
-          expiryDate: newCouponData.expiryDate,
-          expiresAt: newCouponData.expiresAt
-        }
+        newCoupon: { code: newCoupon, discount: 2, expiryDate: newCouponData.expiryDate }
       };
 
-      await update(ref(database, `transactions/${transactionId}`), receiptData);
+      await set(ref(database, `transactions/${txnId}`), receiptData);
 
       if (appliedCoupon) {
-        const usedCouponRef = ref(database, `coupons/${appliedCoupon.code}`);
-        const usedCouponSnapshot = await get(usedCouponRef);
-        if (usedCouponSnapshot.exists()) {
-          await update(usedCouponRef, {
-            status: 'used',
-            usedAt: timestamp,
-            usedInTransaction: transactionId,
-            usedCount: (usedCouponSnapshot.val().usedCount || 0) + 1
-          });
-        }
-      }
-
-      const sessionRef = ref(database, `sessions/${code}`);
-      const sessionSnapshot = await get(sessionRef);
-      const sessionData = sessionSnapshot.val();
-      const isPermanentTestCode = sessionData && sessionData.expiresAt > 9000000000;
-
-      if (isPermanentTestCode) {
-        await update(sessionRef, {
-          status: 'active',
-          lastUsed: Math.floor(timestamp / 1000),
-          lastTransactionId: transactionId,
-          usageCount: (sessionData.usageCount || 0) + 1
-        });
-      } else {
-        await update(sessionRef, {
-          status: 'paid',
-          transactionId: transactionId,
-          paidAt: Math.floor(timestamp / 1000)
+        await update(ref(database, `coupons/${appliedCoupon.code}`), {
+          status: 'used', usedAt: timestamp
         });
       }
 
-      await sendDispenseCommand(cart);
-      await updateInventory(cart);
+      await update(ref(database, `sessions/${code}`), {
+        status: 'paid', paidAt: Math.floor(timestamp / 1000)
+      });
 
-      setReceipt(receiptData);
-      setStep('receipt');
-      setLoading(false);
-
-    } catch (error) {
-      console.error('Error processing payment:', error);
-      alert('Payment successful but there was an error. Please contact support with transaction ID: ' + paymentResponse.razorpay_payment_id);
-      setLoading(false);
-    }
-  };
-
-  // ============ DISPENSE COMMAND ============
-  const sendDispenseCommand = async (items) => {
-    try {
-      const dispenseData = {
-        code: code,
-        items: items.map(item => ({
-          productId: item.id,
-          quantity: item.quantity,
-          name: item.name
-        })),
-        timestamp: Date.now()
-      };
-
-      await update(ref(database, `dispenseQueue/${code}`), dispenseData);
-      console.log('✅ Dispense command sent to Pi');
-    } catch (error) {
-      console.error('Error sending dispense command:', error);
-    }
-  };
-
-  // ============ INVENTORY UPDATE ============
-  const updateInventory = async (items) => {
-    try {
-      for (const item of items) {
+      // Update inventory
+      for (const item of cart) {
         const productRef = ref(database, `machines/${machineId}/inventory/${item.id}`);
         const snapshot = await get(productRef);
-        
         if (snapshot.exists()) {
           const currentStock = snapshot.val().stock;
-          const newStock = Math.max(0, currentStock - item.quantity);
-          
           await update(productRef, {
-            stock: newStock,
+            stock: Math.max(0, currentStock - item.quantity),
             lastSold: Math.floor(Date.now() / 1000)
           });
         }
       }
-      console.log('✅ Inventory updated');
+
+      // Send dispense command
+      await set(ref(database, `dispenseQueue/${code}`), {
+        code, items: cart.map(i => ({ productId: i.id, quantity: i.quantity, name: i.name })),
+        timestamp: Date.now()
+      });
+
+      setReceipt(receiptData);
+      setStep('receipt');
+      setLoading(false);
     } catch (error) {
-      console.error('Error updating inventory:', error);
+      console.error('Payment processing error:', error);
+      alert('Payment successful but error occurred. Contact support.');
+      setLoading(false);
     }
   };
 
-  // ============ EMAIL RECEIPT ============
+  // ============ EMAIL & DOWNLOAD ============
   const sendReceiptEmail = async () => {
-    const emailToSend = emailInputRef.current?.value || userEmail;
-    
-    if (!emailToSend || !/\S+@\S+\.\S+/.test(emailToSend)) {
-      alert('Please enter a valid email address');
+    const email = emailInputRef.current?.value || userEmail;
+    if (!email || !/\S+@\S+\.\S+/.test(email)) {
+      alert('Enter valid email');
       return;
     }
 
     try {
-      const itemsHtml = receipt?.items.map(item => `
-        <tr>
-          <td>${item.image} ${item.name}</td>
-          <td style="text-align: center;">${item.quantity}</td>
-          <td style="text-align: right;">₹${item.price}</td>
-          <td style="text-align: right;">₹${item.price * item.quantity}</td>
-        </tr>
-      `).join('');
-
-      const templateParams = {
-        user_name: 'Valued Customer',
-        to_email: emailToSend,
-        reply_to: emailToSend,
-        user_email: emailToSend,
-        transaction_id: receipt?.transactionId,
-        date: receipt?.date,
-        machine_id: receipt?.machineId,
-        items_html: itemsHtml,
-        total_amount: receipt?.totalAmount,
-        payment_method: receipt?.paymentMethod
-      };
-
       await emailjs.send(
-        EMAILJS_SERVICE_ID,
-        EMAILJS_TEMPLATE_ID,
-        templateParams,
+        EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID,
+        {
+          to_email: email,
+          transaction_id: receipt?.transactionId,
+          date: receipt?.date,
+          total_amount: receipt?.totalAmount
+        },
         EMAILJS_PUBLIC_KEY
       );
-
-      setUserEmail(emailToSend);
+      setUserEmail(email);
       setEmailSent(true);
-      alert('Receipt sent to your email successfully! 📧');
+      alert('Receipt sent! 📧');
     } catch (error) {
-      console.error('Email send failed:', error);
-      alert('Failed to send email. Please try again.');
+      alert('Failed to send email');
     }
   };
 
-  // ============ DOWNLOAD RECEIPT ============
   const downloadReceipt = () => {
-    const receiptText = `
-================================
+    const text = `
 VENDING MACHINE RECEIPT
-================================
-
-Transaction ID: ${receipt?.transactionId}
+========================
+Transaction: ${receipt?.transactionId}
 Date: ${receipt?.date}
-Machine ID: ${receipt?.machineId}
+Machine: ${receipt?.machineId}
 
---------------------------------
-ITEMS PURCHASED
---------------------------------
-${receipt?.items.map(item => 
-  `${item.name} x${item.quantity} - ₹${item.price * item.quantity}`
-).join('\n')}
+ITEMS:
+${receipt?.items.map(i => `${i.name} x${i.quantity} - ₹${i.price * i.quantity}`).join('\n')}
 
---------------------------------
-Subtotal: ₹${receipt?.subtotal.toFixed(2)}
-${receipt?.couponUsed ? `Coupon (${receipt.couponUsed}): -₹${receipt.couponDiscount.toFixed(2)}\n` : ''}Total: ₹${receipt?.totalAmount.toFixed(2)}
-Payment Method: ${receipt?.paymentMethod}
---------------------------------
-
-${receipt?.newCoupon ? `🎉 NEW COUPON EARNED! 🎉
-Code: ${receipt.newCoupon.code}
-Discount: ${receipt.newCoupon.discount}% OFF
-Valid until: ${receipt.newCoupon.expiryDate}
-
-` : ''}Thank you for your purchase!
-================================
+Total: ₹${receipt?.totalAmount.toFixed(2)}
+${receipt?.newCoupon ? `\nNEW COUPON: ${receipt.newCoupon.code}\n${receipt.newCoupon.discount}% OFF - Valid for 7 days\nExpires: ${receipt.newCoupon.expiryDate}\n` : ''}
+Thank you! Please collect your items from the collection point.
     `;
-
-    const blob = new Blob([receiptText], { type: 'text/plain' });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `receipt_${receipt?.transactionId}.txt`;
-    link.click();
-    window.URL.revokeObjectURL(url);
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `receipt_${receipt?.transactionId}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
-  // ============ LOGOUT/CANCEL FUNCTIONS ============
-  const handleLogout = useCallback(async () => {
-    console.log('🔄 Logging out...');
+  // ============ LOGOUT WITH ENHANCED DEBUGGING ============
+  const handleLogout = async () => {
+    console.log('🔄 Logging out - Current state:', { 
+      code, 
+      step, 
+      machineId,
+      hasCode: !!code,
+      isProductSelection: step === 'product-selection'
+    });
     
-    if (code && step === 'product-selection') {
+    // IMPORTANT: Send cancellation to Firebase FIRST
+    if (code) {
       try {
+        console.log('📡 Sending cancellation to Firebase for code:', code.toUpperCase());
         const sessionRef = ref(database, `sessions/${code.toUpperCase()}`);
+        
+        // Update Firebase
         await update(sessionRef, {
           status: 'cancelled',
           cancelledAt: Math.floor(Date.now() / 1000)
         });
-        console.log('✅ Session marked as cancelled');
+        
+        console.log('✅ Session marked as cancelled in Firebase');
+        
+        // Verify the update
+        const verifySnapshot = await get(sessionRef);
+        if (verifySnapshot.exists()) {
+          const verifyData = verifySnapshot.val();
+          console.log('✅ Verification - Status in Firebase:', verifyData.status);
+        }
+        
+        // Wait a moment to ensure Firebase propagates the update
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
       } catch (error) {
-        console.error('Error marking session as cancelled:', error);
+        console.error('❌ Error marking session as cancelled:', error);
       }
+    } else {
+      console.warn('⚠️ No code to cancel');
     }
     
     // Clean up inventory listener
-    if (inventoryListenerRef.current) {
-      inventoryListenerRef.current();
-      inventoryListenerRef.current = null;
+    if (unsubscribeRef.current) {
+      console.log('🧹 Cleaning up inventory listener');
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
     }
     
     // Reset all state
+    console.log('🔄 Resetting all state...');
     setStep('code-entry');
     setCode('');
     setMachineId(null);
@@ -781,151 +574,87 @@ Valid until: ${receipt.newCoupon.expiryDate}
     setSessionExpiresAt(null);
     setCodeExpiresAt(null);
     
-    console.log('✅ State reset to code-entry');
-  }, [code, step]);
+    console.log('✅ State reset complete - Returned to code-entry');
+  };
 
-  const handleAdminLogout = useCallback(() => {
-    console.log('🔐 Admin logout');
-    setShowAdmin(false);
-    setCode('');
-    setError('');
-  }, []);
+  // ============ RENDER SCREENS ============
+  
+  if (showAdmin) {
+    return <Admin onLogout={() => { setShowAdmin(false); setCode(''); }} />;
+  }
 
-  // ============ UI SCREENS ============
-
-  const CodeEntryScreen = () => {
-    const handleCodeExpire = useCallback(() => {
-      setCodeExpiresAt(null);
-      setError('Code has expired. Please generate a new code from the machine.');
-    }, []);
-
-    const handleCodeChange = useCallback((e) => {
-      setCode(e.target.value.toUpperCase());
-    }, []);
-
+  if (step === 'code-entry') {
     return (
       <div className="screen">
         <div className="container">
           <h1>🏪 Vending Machine</h1>
-          <p className="subtitle">Enter the code displayed on the machine</p>
-
+          <p className="subtitle">Enter code from machine</p>
           <div className="code-input-wrapper">
             <input
               type="text"
               value={code}
-              onChange={handleCodeChange}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
               placeholder="ENTER CODE"
               maxLength="6"
               className="code-input"
               autoFocus
             />
           </div>
-
-          {codeExpiresAt && (
-            <CountdownTimer 
-              expiresAt={codeExpiresAt} 
-              onExpire={handleCodeExpire}
-            />
-          )}
-
           {error && <div className="error">{error}</div>}
-
-          <button 
-            onClick={verifyCode} 
-            disabled={loading || code.length !== 6}
-            className="btn-primary"
-          >
+          <button onClick={verifyCode} disabled={loading || code.length !== 6} className="btn-primary">
             {loading ? 'Verifying...' : 'Continue →'}
           </button>
-
           <div className="help-text">
-            <p>👉 Press the button on the vending machine to get your code</p>
-            <p style={{fontSize: '12px', opacity: 0.5, marginTop: '10px'}}>💡 Admin? Enter ADMIN9</p>
+            <p>👉 Press button on machine for code</p>
+            <p style={{fontSize: '12px', opacity: 0.5}}>Admin: ADMIN9</p>
           </div>
         </div>
       </div>
     );
-  };
+  }
 
-  const ProductSelectionScreen = () => {
-    const getCartQuantity = useCallback((productId) => {
-      const item = cart.find(item => item.id === productId);
-      return item ? item.quantity : 0;
-    }, [cart]);
-
-    const handleSessionExpire = useCallback(() => {
-      alert('⏰ Session expired! Please generate a new code.');
-      handleLogout();
-    }, [handleLogout]);
-
-    const handleExitClick = useCallback(() => {
-      const confirmExit = window.confirm(
-        '⚠️ Are you sure you want to exit?\n\nYour cart will be cleared and the session will be cancelled.'
-      );
-      if (confirmExit) {
-        handleLogout();
-      }
-    }, [handleLogout]);
-
+  if (step === 'product-selection') {
     return (
       <div className="screen">
         <div className="container">
-          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px'}}>
-            <h1 style={{margin: 0}}>Select Your Products</h1>
+          <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '20px'}}>
+            <h1 style={{margin: 0}}>Select Products</h1>
             <button 
-              onClick={handleExitClick}
+              onClick={() => {
+                console.log('🔴 Exit button clicked');
+                if (window.confirm('⚠️ Exit and cancel order?\n\nYour cart will be cleared.')) {
+                  console.log('✅ User confirmed exit');
+                  handleLogout();
+                } else {
+                  console.log('❌ User cancelled exit');
+                }
+              }}
               className="logout-btn-small"
             >
               ← Exit
             </button>
           </div>
-          
           <p className="subtitle">Machine: {machineId} | Code: {code}</p>
 
-          {sessionExpiresAt && (
-            <CountdownTimer 
-              expiresAt={sessionExpiresAt} 
-              onExpire={handleSessionExpire}
-            />
-          )}
+          {sessionExpiresAt && <CountdownTimer expiresAt={sessionExpiresAt} onExpire={() => { alert('Session expired!'); handleLogout(); }} />}
 
           <div className="products-grid">
-            {products.map(product => {
-              const inCart = getCartQuantity(product.id);
+            {products.map(p => {
+              const inCart = cart.find(i => i.id === p.id)?.quantity || 0;
               return (
-                <div 
-                  key={product.id}
-                  className={`product-card ${inCart > 0 ? 'in-cart' : ''}`}
-                >
-                  <div className="product-image">{product.image || '📦'}</div>
-                  <h3>{product.name}</h3>
-                  <p className="price">₹{product.price}</p>
-                  <p className="stock">Stock: {product.stock}</p>
-                  
+                <div key={p.id} className={`product-card ${inCart > 0 ? 'in-cart' : ''}`}>
+                  <div className="product-image">{p.image}</div>
+                  <h3>{p.name}</h3>
+                  <p className="price">₹{p.price}</p>
+                  <p className="stock">Stock: {p.stock}</p>
                   {inCart > 0 ? (
                     <div className="quantity-controls">
-                      <button 
-                        onClick={() => removeFromCart(product.id)}
-                        className="qty-btn"
-                      >
-                        −
-                      </button>
+                      <button onClick={() => removeFromCart(p.id)} className="qty-btn">−</button>
                       <span className="quantity">{inCart}</span>
-                      <button 
-                        onClick={() => addToCart(product)}
-                        className="qty-btn"
-                        disabled={inCart >= product.stock}
-                      >
-                        +
-                      </button>
+                      <button onClick={() => addToCart(p)} className="qty-btn" disabled={inCart >= p.stock}>+</button>
                     </div>
                   ) : (
-                    <button 
-                      onClick={() => addToCart(product)}
-                      className="add-btn"
-                    >
-                      Add to Cart
-                    </button>
+                    <button onClick={() => addToCart(p)} className="add-btn">Add to Cart</button>
                   )}
                 </div>
               );
@@ -934,271 +663,123 @@ Valid until: ${receipt.newCoupon.expiryDate}
 
           {products.length === 0 && (
             <div className="empty-state">
-              <p>No products available at this machine</p>
+              <p>❌ No products available</p>
+              <p style={{fontSize: '12px', color: '#999'}}>Firebase: machines/{machineId}/inventory</p>
             </div>
           )}
 
           {cart.length > 0 && (
             <div className="cart-section">
-              <h3>Your Cart ({cart.length} {cart.length === 1 ? 'item' : 'items'})</h3>
+              <h3>Cart ({cart.length})</h3>
               <div className="cart-items">
-                {cart.map(item => (
-                  <div key={item.id} className="cart-item">
-                    <span>{item.image} {item.name}</span>
-                    <span>x{item.quantity}</span>
-                    <span>₹{item.price * item.quantity}</span>
+                {cart.map(i => (
+                  <div key={i.id} className="cart-item">
+                    <span>{i.image} {i.name}</span>
+                    <span>x{i.quantity}</span>
+                    <span>₹{i.price * i.quantity}</span>
                   </div>
                 ))}
               </div>
 
               <div className="coupon-section">
-                <h4>🎟️ Have a Coupon?</h4>
+                <h4>🎟️ Coupon?</h4>
                 {!appliedCoupon ? (
                   <div className="coupon-input-group">
-                    <input
-                      ref={couponInputRef}
-                      type="text"
-                      inputMode="text"
-                      autoCapitalize="characters"
-                      autoCorrect="off"
-                      autoComplete="off"
-                      spellCheck="false"
-                      defaultValue={couponCode}
-                      onInput={(e) => {
-                        e.target.value = e.target.value.toUpperCase();
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          validateAndApplyCoupon();
-                        }
-                      }}
-                      placeholder="VND-XXXX-YYYY"
-                      className="coupon-input"
-                      maxLength="14"
-                    />
-                    <button 
-                      onClick={(e) => {
-                        e.preventDefault();
-                        validateAndApplyCoupon();
-                      }}
-                      className="apply-coupon-btn"
-                      disabled={loading}
-                    >
-                      Apply
-                    </button>
+                    <input ref={couponInputRef} type="text" placeholder="VND-XXXX-YYYY" className="coupon-input" maxLength="14" />
+                    <button onClick={validateAndApplyCoupon} className="apply-coupon-btn">Apply</button>
                   </div>
                 ) : (
                   <div className="applied-coupon">
-                    <div className="coupon-info">
-                      <span className="coupon-badge">✓ {appliedCoupon.code}</span>
-                      <span className="coupon-saving">-₹{appliedCoupon.discountAmount.toFixed(2)} ({appliedCoupon.discount}% off)</span>
-                    </div>
-                    <button onClick={removeCoupon} className="remove-coupon-btn">
-                      ✕
-                    </button>
+                    <span className="coupon-badge">✓ {appliedCoupon.code}</span>
+                    <button onClick={removeCoupon} className="remove-coupon-btn">✕</button>
                   </div>
                 )}
               </div>
 
-              <PriceBreakdown 
-                subtotal={getSubtotal()}
-                appliedCoupon={appliedCoupon}
-                discount={couponDiscount}
-                total={getTotalPrice()}
-              />
-
-              <button 
-                onClick={proceedToPayment}
-                className="btn-primary btn-large"
-                disabled={loading}
-              >
-                {loading ? 'Processing...' : `Pay ₹${getTotalPrice().toFixed(2)} with Razorpay →`}
+              <PriceBreakdown subtotal={getSubtotal()} appliedCoupon={appliedCoupon} discount={couponDiscount} total={getTotalPrice()} />
+              
+              <button onClick={proceedToPayment} className="btn-primary btn-large" disabled={loading}>
+                Pay ₹{getTotalPrice().toFixed(2)} →
               </button>
-              <div className="payment-methods">
-                <p>💳 Secure payment via Razorpay</p>
-                <div style={{display: 'flex', gap: '10px', justifyContent: 'center', marginTop: '5px', fontSize: '12px'}}>
-                  <span>💳 Cards</span>
-                  <span>📱 UPI</span>
-                  <span>🏦 Net Banking</span>
-                  <span>💰 Wallets</span>
-                </div>
-              </div>
             </div>
           )}
         </div>
       </div>
     );
-  };
+  }
 
-  const ReceiptScreen = () => (
-    <div className="screen">
-      <div className="container receipt-container">
-        <div style={{textAlign: 'right', marginBottom: '-20px'}}>
-          <button 
-            onClick={handleLogout}
-            className="logout-btn-small"
-          >
-            ← Exit
-          </button>
-        </div>
-
-        <div className="success-animation">
-          <div className="checkmark">✓</div>
-        </div>
-        
-        <h1>Payment Successful! 🎉</h1>
-        <p className="subtitle">Your order is being prepared</p>
-
-        <div className="receipt-box">
-          <h3>Digital Receipt</h3>
-          
-          <div className="receipt-row">
-            <span>Transaction ID:</span>
-            <span className="receipt-value">{receipt?.transactionId}</span>
+  if (step === 'receipt') {
+    return (
+      <div className="screen">
+        <div className="container receipt-container">
+          <div className="success-animation">
+            <div className="checkmark">✓</div>
           </div>
-          
-          <div className="receipt-row">
-            <span>Date & Time:</span>
-            <span className="receipt-value">{receipt?.date}</span>
-          </div>
-          
-          <div className="receipt-row">
-            <span>Machine ID:</span>
-            <span className="receipt-value">{receipt?.machineId}</span>
+          <h1>Payment Successful! 🎉</h1>
+
+          {/* Collection Instructions */}
+          <div className="instructions-box">
+            <h4>📦 Please Collect Your Items</h4>
+            <p>Your order is being dispensed now.</p>
+            <p className="collection-point-text">
+              👇 Collect from the collection point below 👇
+            </p>
           </div>
 
-          <div className="receipt-divider"></div>
-
-          <h4>Items Purchased:</h4>
-          {receipt?.items.map((item, index) => (
-            <div key={index} className="receipt-item">
-              <span>{item.image} {item.name} x{item.quantity}</span>
-              <span>₹{item.price * item.quantity}</span>
+          <div className="receipt-box">
+            <h3>Receipt</h3>
+            <div className="receipt-row">
+              <span>Transaction:</span>
+              <span>{receipt?.transactionId}</span>
             </div>
-          ))}
-
-          <div className="receipt-divider"></div>
-
-          <div className="receipt-row">
-            <span>Subtotal:</span>
-            <span className="receipt-value">₹{receipt?.subtotal.toFixed(2)}</span>
+            <div className="receipt-row">
+              <span>Date:</span>
+              <span>{receipt?.date}</span>
+            </div>
+            <h4>Items:</h4>
+            {receipt?.items.map((i, idx) => (
+              <div key={idx} className="receipt-item">
+                <span>{i.image} {i.name} x{i.quantity}</span>
+                <span>₹{i.price * i.quantity}</span>
+              </div>
+            ))}
+            <div className="receipt-row receipt-total">
+              <span>Total:</span>
+              <span>₹{receipt?.totalAmount.toFixed(2)}</span>
+            </div>
           </div>
 
-          {receipt?.couponUsed && (
-            <div className="receipt-row" style={{color: '#4caf50'}}>
-              <span>Coupon ({receipt.couponUsed}):</span>
-              <span className="receipt-value">-₹{receipt.couponDiscount.toFixed(2)}</span>
+          {/* New Coupon with 7-day validity */}
+          {receipt?.newCoupon && (
+            <div className="new-coupon-box">
+              <h3>🎉 Your Next Purchase Coupon!</h3>
+              <div className="coupon-code-big">{receipt.newCoupon.code}</div>
+              <div className="coupon-details">
+                <p>💰 Get {receipt.newCoupon.discount}% OFF on your next order</p>
+                <p>📅 Valid for 7 days until: {receipt.newCoupon.expiryDate}</p>
+                <p className="coupon-note">⚠️ Single use only • Save this code!</p>
+              </div>
             </div>
           )}
 
-          <div className="receipt-row receipt-total">
-            <span>Total Paid:</span>
-            <span>₹{receipt?.totalAmount.toFixed(2)}</span>
-          </div>
-
-          <div className="receipt-row">
-            <span>Payment Method:</span>
-            <span className="receipt-value">{receipt?.paymentMethod}</span>
-          </div>
-        </div>
-
-        {receipt?.newCoupon && (
-          <div className="new-coupon-box">
-            <h3>🎉 Congratulations!</h3>
-            <p>You've earned a discount coupon for your next purchase!</p>
-            <div className="coupon-display">
-              <div className="coupon-code-big">{receipt.newCoupon.code}</div>
-              <div className="coupon-details">
-                <p><strong>{receipt.newCoupon.discount}% OFF</strong> on your next order</p>
-                <p>Valid until: <strong>{receipt.newCoupon.expiryDate}</strong></p>
-                <p className="coupon-note">Use this code at checkout</p>
-              </div>
+          <div className="email-section">
+            <h4>📧 Email Receipt</h4>
+            <div className="email-input-group">
+              <input ref={emailInputRef} type="email" placeholder="your@email.com" className="email-input" disabled={emailSent} />
+              <button onClick={sendReceiptEmail} className="btn-secondary" disabled={emailSent}>
+                {emailSent ? '✓ Sent' : 'Send'}
+              </button>
             </div>
           </div>
-        )}
 
-        <div className="instructions-box">
-          <h4>📦 Collect Your Products</h4>
-          <p>Your products are being dispensed from the vending machine.</p>
-          <p>Please collect them from the collection area.</p>
+          <button onClick={downloadReceipt} className="btn-secondary">📥 Download Receipt</button>
+          <button onClick={handleLogout} className="btn-primary" style={{marginTop: '10px'}}>← New Order</button>
         </div>
-
-        <div className="email-section">
-          <h4>📧 Email Receipt</h4>
-          <div className="email-input-group">
-            <input
-              ref={emailInputRef}
-              type="email"
-              inputMode="email"
-              autoCapitalize="none"
-              autoCorrect="off"
-              autoComplete="email"
-              spellCheck="false"
-              defaultValue={userEmail}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !emailSent) {
-                  e.preventDefault();
-                  sendReceiptEmail();
-                }
-              }}
-              placeholder="Enter your email"
-              className="email-input"
-              disabled={emailSent}
-            />
-            <button 
-              onClick={(e) => {
-                e.preventDefault();
-                sendReceiptEmail();
-              }}
-              className="btn-secondary"
-              disabled={emailSent}
-            >
-              {emailSent ? '✓ Sent' : 'Send Receipt'}
-            </button>
-          </div>
-        </div>
-
-        <button 
-          onClick={downloadReceipt}
-          className="btn-secondary"
-        >
-          📥 Download Receipt
-        </button>
-
-        <button 
-          onClick={() => window.print()}
-          className="btn-secondary"
-          style={{ marginTop: '10px' }}
-        >
-          🖨️ Print Receipt
-        </button>
-
-        <button 
-          onClick={handleLogout}
-          className="btn-primary"
-          style={{ marginTop: '10px' }}
-        >
-          ← Back to Home
-        </button>
       </div>
-    </div>
-  );
+    );
+  }
 
-  // ============ MAIN RENDER ============
-  return (
-    <div className="app">
-      {showAdmin ? (
-        <Admin onLogout={handleAdminLogout} />
-      ) : (
-        <>
-          {step === 'code-entry' && <CodeEntryScreen />}
-          {step === 'product-selection' && <ProductSelectionScreen />}
-          {step === 'receipt' && <ReceiptScreen />}
-        </>
-      )}
-    </div>
-  );
+  return null;
 }
 
 export default App;
