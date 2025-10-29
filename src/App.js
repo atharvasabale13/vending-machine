@@ -1,7 +1,7 @@
-// src/App.js - Complete Vending Machine Web App with Fixed State Management
+// src/App.js - Fixed version with no reloading and real-time sync
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { database } from './firebase';
-import { ref, get, update } from 'firebase/database';
+import { ref, get, update, onValue } from 'firebase/database';
 import emailjs from '@emailjs/browser';
 import Admin from './Admin';
 import './App.css';
@@ -26,7 +26,7 @@ const loadRazorpayScript = () => {
 };
 
 // ============ COUNTDOWN TIMER COMPONENT ============
-const CountdownTimer = ({ expiresAt, onExpire }) => {
+const CountdownTimer = React.memo(({ expiresAt, onExpire }) => {
   const [timeLeft, setTimeLeft] = useState(null);
 
   useEffect(() => {
@@ -81,7 +81,7 @@ const CountdownTimer = ({ expiresAt, onExpire }) => {
       <span style={{fontSize: '14px', opacity: 0.9}}>remaining</span>
     </div>
   );
-};
+});
 
 // Memoized Price Breakdown Component
 const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total }) => (
@@ -129,6 +129,7 @@ function App() {
   // Refs
   const couponInputRef = useRef(null);
   const emailInputRef = useRef(null);
+  const inventoryListenerRef = useRef(null);
 
   // ============ INITIALIZATION ============
   useEffect(() => {
@@ -139,22 +140,61 @@ function App() {
       window.history.scrollRestoration = 'manual';
     }
 
-    // Clear any lingering state
     return () => {
       console.log('🧹 Cleanup on unmount');
+      // Clean up inventory listener
+      if (inventoryListenerRef.current) {
+        inventoryListenerRef.current();
+      }
     };
   }, []);
 
-  // ============ STATE DEBUG LOGGING ============
+  // ============ REAL-TIME INVENTORY SYNC ============
   useEffect(() => {
-    console.log('📊 Current State:', {
-      step,
-      showAdmin,
-      code: code || '(empty)',
-      machineId,
-      cartItems: cart.length
-    });
-  }, [step, showAdmin, code, machineId, cart.length]);
+    if (machineId && step === 'product-selection') {
+      console.log('👂 Setting up real-time inventory listener for:', machineId);
+      
+      const inventoryRef = ref(database, `machines/${machineId}/inventory`);
+      
+      // Listen for real-time updates
+      const unsubscribe = onValue(inventoryRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const productsData = snapshot.val();
+          console.log('🔄 Inventory updated from Firebase');
+          
+          const productList = Object.keys(productsData).map(key => ({
+            id: key,
+            ...productsData[key]
+          }));
+          
+          // Update products with available stock
+          const availableProducts = productList.filter(p => p.stock > 0);
+          setProducts(availableProducts);
+          
+          // Update cart quantities if stock changed
+          setCart(prevCart => 
+            prevCart.map(item => {
+              const updatedProduct = productList.find(p => p.id === item.id);
+              if (updatedProduct && item.quantity > updatedProduct.stock) {
+                console.log(`⚠️ Adjusting ${item.name} quantity from ${item.quantity} to ${updatedProduct.stock}`);
+                return { ...item, quantity: updatedProduct.stock };
+              }
+              return item;
+            }).filter(item => item.quantity > 0) // Remove items with 0 stock
+          );
+        }
+      });
+
+      // Store unsubscribe function
+      inventoryListenerRef.current = unsubscribe;
+
+      // Cleanup listener when component unmounts or machineId changes
+      return () => {
+        console.log('🛑 Cleaning up inventory listener');
+        unsubscribe();
+      };
+    }
+  }, [machineId, step]);
 
   // Check code expiry
   const checkCodeExpiry = useCallback(async (codeToCheck) => {
@@ -203,7 +243,7 @@ function App() {
   }, [code, step, checkCodeExpiry]);
 
   // ============ CODE VERIFICATION ============
-  const verifyCode = async () => {
+  const verifyCode = useCallback(async () => {
     if (code.length !== 6) {
       setError('Please enter a 6-character code');
       return;
@@ -233,11 +273,10 @@ function App() {
             loginTime: currentTime
           });
           
-          console.log('✅ Session validated - Moving to product selection');
+          console.log('✅ Session validated');
           
           setMachineId(data.machineId);
           setSessionExpiresAt(data.expiresAt);
-          await loadProducts(data.machineId);
           setStep('product-selection');
         } else if (data.expiresAt <= currentTime) {
           setError('Code has expired. Please generate a new code from the machine.');
@@ -256,76 +295,45 @@ function App() {
     }
 
     setLoading(false);
-  };
-
-  // ============ PRODUCT LOADING ============
-  const loadProducts = async (machineId) => {
-    console.log('🔍 Loading products for machine:', machineId);
-    
-    try {
-      const productsRef = ref(database, `machines/${machineId}/inventory`);
-      const snapshot = await get(productsRef);
-
-      if (snapshot.exists()) {
-        const productsData = snapshot.val();
-        console.log('📦 Found products:', Object.keys(productsData).length);
-        
-        const productList = Object.keys(productsData).map(key => ({
-          id: key,
-          ...productsData[key]
-        }));
-        
-        // Filter out products with 0 stock
-        const availableProducts = productList.filter(p => p.stock > 0);
-        console.log('✅ Available products:', availableProducts.length);
-        setProducts(availableProducts);
-      } else {
-        console.warn('⚠️ No products found, using defaults');
-        setProducts([
-          { id: 'product1', name: 'Chips', price: 20, stock: 10, image: '🍟' },
-          { id: 'product2', name: 'Cookies', price: 30, stock: 8, image: '🍪' },
-          { id: 'product3', name: 'Juice', price: 40, stock: 5, image: '🧃' },
-          { id: 'product4', name: 'Chocolate', price: 50, stock: 12, image: '🍫' }
-        ]);
-      }
-    } catch (err) {
-      console.error('❌ Error loading products:', err);
-      setError('Failed to load products');
-    }
-  };
+  }, [code]);
 
   // ============ CART MANAGEMENT ============
-  const addToCart = (product) => {
-    const existingItem = cart.find(item => item.id === product.id);
-    
-    if (existingItem) {
-      if (existingItem.quantity < product.stock) {
-        setCart(cart.map(item => 
-          item.id === product.id 
-            ? { ...item, quantity: item.quantity + 1 }
-            : item
-        ));
+  const addToCart = useCallback((product) => {
+    setCart(prevCart => {
+      const existingItem = prevCart.find(item => item.id === product.id);
+      
+      if (existingItem) {
+        if (existingItem.quantity < product.stock) {
+          return prevCart.map(item => 
+            item.id === product.id 
+              ? { ...item, quantity: item.quantity + 1 }
+              : item
+          );
+        } else {
+          alert(`Maximum stock available: ${product.stock}`);
+          return prevCart;
+        }
       } else {
-        alert(`Maximum stock available: ${product.stock}`);
+        return [...prevCart, { ...product, quantity: 1 }];
       }
-    } else {
-      setCart([...cart, { ...product, quantity: 1 }]);
-    }
-  };
+    });
+  }, []);
 
-  const removeFromCart = (productId) => {
-    const existingItem = cart.find(item => item.id === productId);
-    
-    if (existingItem.quantity > 1) {
-      setCart(cart.map(item => 
-        item.id === productId 
-          ? { ...item, quantity: item.quantity - 1 }
-          : item
-      ));
-    } else {
-      setCart(cart.filter(item => item.id !== productId));
-    }
-  };
+  const removeFromCart = useCallback((productId) => {
+    setCart(prevCart => {
+      const existingItem = prevCart.find(item => item.id === productId);
+      
+      if (existingItem.quantity > 1) {
+        return prevCart.map(item => 
+          item.id === productId 
+            ? { ...item, quantity: item.quantity - 1 }
+            : item
+        );
+      } else {
+        return prevCart.filter(item => item.id !== productId);
+      }
+    });
+  }, []);
 
   const getSubtotal = useCallback(() => {
     return cart.reduce((total, item) => total + (item.price * item.quantity), 0);
@@ -376,7 +384,7 @@ function App() {
     }
   };
 
-  const validateAndApplyCoupon = async () => {
+  const validateAndApplyCoupon = useCallback(async () => {
     const codeToValidate = couponInputRef.current?.value?.toUpperCase() || couponCode.toUpperCase();
     
     if (!codeToValidate || codeToValidate.trim() === '') {
@@ -429,19 +437,19 @@ function App() {
     }
     
     setLoading(false);
-  };
+  }, [couponCode, getSubtotal]);
 
-  const removeCoupon = () => {
+  const removeCoupon = useCallback(() => {
     setCouponCode('');
     setAppliedCoupon(null);
     setCouponDiscount(0);
     if (couponInputRef.current) {
       couponInputRef.current.value = '';
     }
-  };
+  }, []);
 
   // ============ RAZORPAY PAYMENT ============
-  const proceedToPayment = async () => {
+  const proceedToPayment = useCallback(async () => {
     const total = getTotalPrice();
     const amountInPaise = Math.round(total * 100);
     const itemsList = cart.map(item => `${item.name} x${item.quantity}`).join(', ');
@@ -513,7 +521,7 @@ function App() {
       alert('Error initializing payment. Please try again.');
       setLoading(false);
     }
-  };
+  }, [cart, code, couponDiscount, getSubtotal, getTotalPrice, machineId, userEmail]);
 
   // ============ PAYMENT SUCCESS HANDLER ============
   const handlePaymentSuccess = async (paymentResponse) => {
@@ -735,7 +743,7 @@ Valid until: ${receipt.newCoupon.expiryDate}
   };
 
   // ============ LOGOUT/CANCEL FUNCTIONS ============
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     console.log('🔄 Logging out...');
     
     if (code && step === 'product-selection') {
@@ -749,6 +757,12 @@ Valid until: ${receipt.newCoupon.expiryDate}
       } catch (error) {
         console.error('Error marking session as cancelled:', error);
       }
+    }
+    
+    // Clean up inventory listener
+    if (inventoryListenerRef.current) {
+      inventoryListenerRef.current();
+      inventoryListenerRef.current = null;
     }
     
     // Reset all state
@@ -768,22 +782,26 @@ Valid until: ${receipt.newCoupon.expiryDate}
     setCodeExpiresAt(null);
     
     console.log('✅ State reset to code-entry');
-  };
+  }, [code, step]);
 
-  const handleAdminLogout = () => {
+  const handleAdminLogout = useCallback(() => {
     console.log('🔐 Admin logout');
     setShowAdmin(false);
     setCode('');
     setError('');
-  };
+  }, []);
 
   // ============ UI SCREENS ============
 
   const CodeEntryScreen = () => {
-    const handleCodeExpire = () => {
+    const handleCodeExpire = useCallback(() => {
       setCodeExpiresAt(null);
       setError('Code has expired. Please generate a new code from the machine.');
-    };
+    }, []);
+
+    const handleCodeChange = useCallback((e) => {
+      setCode(e.target.value.toUpperCase());
+    }, []);
 
     return (
       <div className="screen">
@@ -795,7 +813,7 @@ Valid until: ${receipt.newCoupon.expiryDate}
             <input
               type="text"
               value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              onChange={handleCodeChange}
               placeholder="ENTER CODE"
               maxLength="6"
               className="code-input"
@@ -833,21 +851,21 @@ Valid until: ${receipt.newCoupon.expiryDate}
     const getCartQuantity = useCallback((productId) => {
       const item = cart.find(item => item.id === productId);
       return item ? item.quantity : 0;
-    }, []);
+    }, [cart]);
 
-    const handleSessionExpire = () => {
+    const handleSessionExpire = useCallback(() => {
       alert('⏰ Session expired! Please generate a new code.');
       handleLogout();
-    };
+    }, [handleLogout]);
 
-    const handleExitClick = () => {
+    const handleExitClick = useCallback(() => {
       const confirmExit = window.confirm(
         '⚠️ Are you sure you want to exit?\n\nYour cart will be cleared and the session will be cancelled.'
       );
       if (confirmExit) {
         handleLogout();
       }
-    };
+    }, [handleLogout]);
 
     return (
       <div className="screen">
