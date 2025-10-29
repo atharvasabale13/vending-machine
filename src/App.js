@@ -1,15 +1,87 @@
-// src/App.js - Complete Vending Machine with Embedded Admin
+// src/App.js - Complete Vending Machine with Cancellation Detection
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { database } from './firebase';
 import { ref, get, update } from 'firebase/database';
 import emailjs from '@emailjs/browser';
-import Admin from './Admin'; // Import Admin component
+import Admin from './Admin';
 import './App.css';
 
 // EmailJS Configuration
 const EMAILJS_SERVICE_ID = 'service_goajbuw';
 const EMAILJS_TEMPLATE_ID = 'template_qwa3s96';
 const EMAILJS_PUBLIC_KEY = 'SdaFtoVQpifXFXcp1';
+
+// Razorpay Configuration
+const RAZORPAY_KEY_ID = 'rzp_test_RYR6kqiYhpWDq0'; // Replace with your key
+
+// Load Razorpay script
+const loadRazorpayScript = () => {
+  return new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+};
+
+// ============ COUNTDOWN TIMER COMPONENT ============
+const CountdownTimer = ({ expiresAt, onExpire }) => {
+  const [timeLeft, setTimeLeft] = useState(null);
+
+  useEffect(() => {
+    const calculateTimeLeft = () => {
+      const now = Math.floor(Date.now() / 1000);
+      const remaining = expiresAt - now;
+      
+      if (remaining <= 0) {
+        if (onExpire) onExpire();
+        return null;
+      }
+      
+      const minutes = Math.floor(remaining / 60);
+      const seconds = remaining % 60;
+      return { minutes, seconds, total: remaining };
+    };
+
+    setTimeLeft(calculateTimeLeft());
+
+    const timer = setInterval(() => {
+      setTimeLeft(calculateTimeLeft());
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [expiresAt, onExpire]);
+
+  if (!timeLeft) return null;
+
+  const isLowTime = timeLeft.total < 60;
+  const isVeryLowTime = timeLeft.total < 30;
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '8px',
+      padding: '12px 20px',
+      background: isVeryLowTime ? '#ff5252' : isLowTime ? '#ff9800' : '#4caf50',
+      color: 'white',
+      borderRadius: '12px',
+      fontWeight: 'bold',
+      fontSize: '16px',
+      margin: '15px 0',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+      animation: isVeryLowTime ? 'pulse 1s infinite' : 'none'
+    }}>
+      <span style={{fontSize: '20px'}}>⏱️</span>
+      <span>
+        {timeLeft.minutes}:{timeLeft.seconds.toString().padStart(2, '0')}
+      </span>
+      <span style={{fontSize: '14px', opacity: 0.9}}>remaining</span>
+    </div>
+  );
+};
 
 // Memoized Price Breakdown Component
 const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total }) => (
@@ -34,7 +106,7 @@ const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total })
 function App() {
   // ============ STATE MANAGEMENT ============
   const [step, setStep] = useState('code-entry');
-  const [showAdmin, setShowAdmin] = useState(false); // NEW: Admin mode
+  const [showAdmin, setShowAdmin] = useState(false);
   const [code, setCode] = useState('');
   const [machineId, setMachineId] = useState(null);
   const [products, setProducts] = useState([]);
@@ -50,25 +122,76 @@ function App() {
   const [appliedCoupon, setAppliedCoupon] = useState(null);
   const [couponDiscount, setCouponDiscount] = useState(0);
 
-  // Refs for input focus management
+  // Timer states
+  const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
+  const [codeExpiresAt, setCodeExpiresAt] = useState(null);
+
+  // Refs
   const couponInputRef = useRef(null);
   const emailInputRef = useRef(null);
 
-  // Disable scroll restoration
+  // Load Razorpay
   useEffect(() => {
+    loadRazorpayScript();
+    
     if ('scrollRestoration' in window.history) {
       window.history.scrollRestoration = 'manual';
     }
   }, []);
 
-  // ============ CODE VERIFICATION (WITH ADMIN SECRET CODE) ============
+  // Check code expiry
+  const checkCodeExpiry = useCallback(async (codeToCheck) => {
+    if (codeToCheck.length !== 6) {
+      setCodeExpiresAt(null);
+      return;
+    }
+
+    try {
+      const sessionRef = ref(database, `sessions/${codeToCheck.toUpperCase()}`);
+      const snapshot = await get(sessionRef);
+
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        const currentTime = Math.floor(Date.now() / 1000);
+
+        if (data.status === 'active' && data.expiresAt > currentTime) {
+          setCodeExpiresAt(data.expiresAt);
+          setError('');
+        } else if (data.expiresAt <= currentTime) {
+          setCodeExpiresAt(null);
+          setError('Code has expired');
+        } else {
+          setCodeExpiresAt(null);
+          setError('Code already used');
+        }
+      } else {
+        setCodeExpiresAt(null);
+      }
+    } catch (err) {
+      console.error('Error checking code:', err);
+    }
+  }, []);
+
+  // Debounced code check
+  useEffect(() => {
+    if (code.length === 6 && step === 'code-entry') {
+      const timer = setTimeout(() => {
+        checkCodeExpiry(code);
+      }, 500);
+
+      return () => clearTimeout(timer);
+    } else {
+      setCodeExpiresAt(null);
+    }
+  }, [code, step, checkCodeExpiry]);
+
+  // ============ CODE VERIFICATION ============
   const verifyCode = async () => {
     if (code.length !== 6) {
       setError('Please enter a 6-character code');
       return;
     }
 
-    // 🔐 SECRET ADMIN CODE - Show Admin Panel
     if (code.toUpperCase() === 'ADMIN9') {
       setShowAdmin(true);
       setError('');
@@ -87,16 +210,28 @@ function App() {
         const currentTime = Math.floor(Date.now() / 1000);
 
         if (data.status === 'active' && data.expiresAt > currentTime) {
+          // ✅ MARK AS LOGGED IN FOR PI TO DETECT
+          await update(sessionRef, {
+            isLoggedIn: true,
+            loginTime: currentTime
+          });
+          
+          console.log('✅ Marked as logged in for Pi');
+          
           setMachineId(data.machineId);
+          setSessionExpiresAt(data.expiresAt);
           loadProducts(data.machineId);
           setStep('product-selection');
         } else if (data.expiresAt <= currentTime) {
           setError('Code has expired. Please generate a new code from the machine.');
+          setCodeExpiresAt(null);
         } else {
           setError('Code has already been used or is invalid.');
+          setCodeExpiresAt(null);
         }
       } else {
         setError('Invalid code. Please check and try again.');
+        setCodeExpiresAt(null);
       }
     } catch (err) {
       console.error('Verification error:', err);
@@ -276,38 +411,69 @@ function App() {
     }
   };
 
-  // ============ PAYMENT (MOCK) ============
-  const proceedToPayment = () => {
+  // ============ RAZORPAY PAYMENT ============
+  const proceedToPayment = async () => {
     const total = getTotalPrice();
     const itemsList = cart.map(item => `${item.name} x${item.quantity}`).join(', ');
 
-    const confirmPayment = window.confirm(
-      `🛒 Payment Confirmation\n\n` +
-      `Items: ${itemsList}\n` +
-      `Total Amount: ₹${total}\n\n` +
-      `This is a test payment. Click OK to proceed\n` +
-      `(Or Cancel to go back)`
-    );
+    if (!window.Razorpay) {
+      alert('Payment gateway is loading. Please try again in a moment.');
+      await loadRazorpayScript();
+      return;
+    }
 
-    if (confirmPayment) {
-      setLoading(true);
-
-      setTimeout(async () => {
-        try {
-          const mockTransactionId = `mock_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-          const mockResponse = {
-            razorpay_payment_id: mockTransactionId
-          };
-
-          await handlePaymentSuccess(mockResponse);
-        } catch (error) {
-          console.error('Payment error:', error);
-          setError('Payment processing failed. Please try again.');
-        } finally {
-          setLoading(false);
+    try {
+      const options = {
+        key: RAZORPAY_KEY_ID,
+        amount: total * 100,
+        currency: 'INR',
+        name: 'Vending Machine',
+        description: `Purchase: ${itemsList}`,
+        image: '',
+        handler: async function (response) {
+          console.log('✅ Payment successful!', response);
+          setLoading(true);
+          await handlePaymentSuccess(response);
+        },
+        prefill: {
+          name: 'Customer',
+          email: userEmail || 'customer@example.com',
+          contact: ''
+        },
+        notes: {
+          machineId: machineId,
+          sessionCode: code,
+          items: itemsList
+        },
+        theme: {
+          color: '#667eea'
+        },
+        modal: {
+          ondismiss: function() {
+            console.log('Payment cancelled by user');
+          },
+          escape: true,
+          backdropclose: true,
+          confirm_close: true
         }
-      }, 2000);
+      };
+
+      const razorpayInstance = new window.Razorpay(options);
+      
+      razorpayInstance.on('payment.failed', function (response) {
+        if (!response.error.description.includes('test') && 
+            response.error.reason !== 'payment_cancelled') {
+          alert('❌ Payment failed!\n\n' + response.error.description);
+        }
+        console.log('Payment error:', response.error);
+      });
+
+      razorpayInstance.open();
+
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('Error initializing payment. Please try again.');
+      setLoading(false);
     }
   };
 
@@ -322,6 +488,8 @@ function App() {
 
       const receiptData = {
         transactionId: transactionId,
+        razorpayOrderId: paymentResponse.razorpay_order_id || '',
+        razorpaySignature: paymentResponse.razorpay_signature || '',
         machineId: machineId,
         code: code,
         items: cart,
@@ -331,7 +499,8 @@ function App() {
         totalAmount: getTotalPrice(),
         timestamp: timestamp,
         date: new Date(timestamp).toLocaleString('en-IN'),
-        paymentMethod: 'Mock Payment',
+        paymentMethod: 'Razorpay',
+        paymentStatus: 'completed',
         status: 'completed',
         newCoupon: {
           code: newCouponCode,
@@ -381,10 +550,12 @@ function App() {
 
       setReceipt(receiptData);
       setStep('receipt');
+      setLoading(false);
 
     } catch (error) {
       console.error('Error processing payment:', error);
-      alert('Payment successful but there was an error. Please contact support.');
+      alert('Payment successful but there was an error. Please contact support with transaction ID: ' + paymentResponse.razorpay_payment_id);
+      setLoading(false);
     }
   };
 
@@ -521,8 +692,22 @@ Valid until: ${receipt.newCoupon.expiryDate}
     window.URL.revokeObjectURL(url);
   };
 
-  // ============ LOGOUT FUNCTION ============
-  const handleLogout = () => {
+  // ============ LOGOUT/CANCEL FUNCTIONS ============
+  const handleLogout = async () => {
+    // ✅ MARK SESSION AS CANCELLED IF USER WAS LOGGED IN
+    if (code && step === 'product-selection') {
+      try {
+        const sessionRef = ref(database, `sessions/${code.toUpperCase()}`);
+        await update(sessionRef, {
+          status: 'cancelled',
+          cancelledAt: Math.floor(Date.now() / 1000)
+        });
+        console.log('✅ Session marked as cancelled for Pi');
+      } catch (error) {
+        console.error('Error marking session as cancelled:', error);
+      }
+    }
+    
     setStep('code-entry');
     setCode('');
     setMachineId(null);
@@ -535,9 +720,10 @@ Valid until: ${receipt.newCoupon.expiryDate}
     setCouponCode('');
     setAppliedCoupon(null);
     setCouponDiscount(0);
+    setSessionExpiresAt(null);
+    setCodeExpiresAt(null);
   };
 
-  // ============ ADMIN LOGOUT ============
   const handleAdminLogout = () => {
     setShowAdmin(false);
     setCode('');
@@ -546,41 +732,55 @@ Valid until: ${receipt.newCoupon.expiryDate}
 
   // ============ UI SCREENS ============
 
-  const CodeEntryScreen = () => (
-    <div className="screen">
-      <div className="container">
-        <h1>🏪 Vending Machine</h1>
-        <p className="subtitle">Enter the code displayed on the machine</p>
+  const CodeEntryScreen = () => {
+    const handleCodeExpire = () => {
+      setCodeExpiresAt(null);
+      setError('Code has expired. Please generate a new code from the machine.');
+    };
 
-        <div className="code-input-wrapper">
-          <input
-            type="text"
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
-            placeholder="ENTER CODE"
-            maxLength="6"
-            className="code-input"
-            autoFocus
-          />
-        </div>
+    return (
+      <div className="screen">
+        <div className="container">
+          <h1>🏪 Vending Machine</h1>
+          <p className="subtitle">Enter the code displayed on the machine</p>
 
-        {error && <div className="error">{error}</div>}
+          <div className="code-input-wrapper">
+            <input
+              type="text"
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              placeholder="ENTER CODE"
+              maxLength="6"
+              className="code-input"
+              autoFocus
+            />
+          </div>
 
-        <button 
-          onClick={verifyCode} 
-          disabled={loading || code.length !== 6}
-          className="btn-primary"
-        >
-          {loading ? 'Verifying...' : 'Continue →'}
-        </button>
+          {codeExpiresAt && (
+            <CountdownTimer 
+              expiresAt={codeExpiresAt} 
+              onExpire={handleCodeExpire}
+            />
+          )}
 
-        <div className="help-text">
-          <p>👉 Press the button on the vending machine to get your code</p>
-          <p style={{fontSize: '12px', opacity: 0.5, marginTop: '10px'}}>💡 Admin? Enter ADMIN9</p>
+          {error && <div className="error">{error}</div>}
+
+          <button 
+            onClick={verifyCode} 
+            disabled={loading || code.length !== 6}
+            className="btn-primary"
+          >
+            {loading ? 'Verifying...' : 'Continue →'}
+          </button>
+
+          <div className="help-text">
+            <p>👉 Press the button on the vending machine to get your code</p>
+            <p style={{fontSize: '12px', opacity: 0.5, marginTop: '10px'}}>💡 Admin? Enter ADMIN9</p>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const ProductSelectionScreen = () => {
     const getCartQuantity = useCallback((productId) => {
@@ -588,13 +788,27 @@ Valid until: ${receipt.newCoupon.expiryDate}
       return item ? item.quantity : 0;
     }, []);
 
+    const handleSessionExpire = () => {
+      alert('⏰ Session expired! Please generate a new code.');
+      handleLogout();
+    };
+
+    const handleExitClick = () => {
+      const confirmExit = window.confirm(
+        '⚠️ Are you sure you want to exit?\n\nYour cart will be cleared and the session will be cancelled.'
+      );
+      if (confirmExit) {
+        handleLogout();
+      }
+    };
+
     return (
       <div className="screen">
         <div className="container">
           <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px'}}>
             <h1 style={{margin: 0}}>Select Your Products</h1>
             <button 
-              onClick={handleLogout}
+              onClick={handleExitClick}
               className="logout-btn-small"
             >
               ← Exit
@@ -602,6 +816,13 @@ Valid until: ${receipt.newCoupon.expiryDate}
           </div>
           
           <p className="subtitle">Machine: {machineId} | Code: {code}</p>
+
+          {sessionExpiresAt && (
+            <CountdownTimer 
+              expiresAt={sessionExpiresAt} 
+              onExpire={handleSessionExpire}
+            />
+          )}
 
           <div className="products-grid">
             {products.map(product => {
@@ -727,10 +948,16 @@ Valid until: ${receipt.newCoupon.expiryDate}
                 className="btn-primary btn-large"
                 disabled={loading}
               >
-                {loading ? 'Processing...' : `Pay ₹${getTotalPrice()} →`}
+                {loading ? 'Processing...' : `Pay ₹${getTotalPrice()} with Razorpay →`}
               </button>
               <div className="payment-methods">
-                <p>💳 Mock Payment (Test Mode)</p>
+                <p>💳 Secure payment via Razorpay</p>
+                <div style={{display: 'flex', gap: '10px', justifyContent: 'center', marginTop: '5px', fontSize: '12px'}}>
+                  <span>💳 Cards</span>
+                  <span>📱 UPI</span>
+                  <span>🏦 Net Banking</span>
+                  <span>💰 Wallets</span>
+                </div>
               </div>
             </div>
           )}
