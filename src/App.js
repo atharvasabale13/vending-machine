@@ -1,4 +1,4 @@
-// src/App.js - Complete Vending Machine with Cancellation Detection
+// src/App.js - Complete Vending Machine Web App with Fixed State Management
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { database } from './firebase';
 import { ref, get, update } from 'firebase/database';
@@ -12,7 +12,7 @@ const EMAILJS_TEMPLATE_ID = 'template_qwa3s96';
 const EMAILJS_PUBLIC_KEY = 'SdaFtoVQpifXFXcp1';
 
 // Razorpay Configuration
-const RAZORPAY_KEY_ID = 'rzp_test_RYR6kqiYhpWDq0'; // Replace with your key
+const RAZORPAY_KEY_ID = 'rzp_test_RYR6kqiYhpWDq0';
 
 // Load Razorpay script
 const loadRazorpayScript = () => {
@@ -88,7 +88,7 @@ const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total })
   <div className="price-breakdown">
     <div className="price-row">
       <span>Subtotal:</span>
-      <span>₹{subtotal}</span>
+      <span>₹{subtotal.toFixed(2)}</span>
     </div>
     {appliedCoupon && (
       <div className="price-row discount-row">
@@ -98,7 +98,7 @@ const PriceBreakdown = React.memo(({ subtotal, appliedCoupon, discount, total })
     )}
     <div className="cart-total">
       <strong>Total:</strong>
-      <strong>₹{total}</strong>
+      <strong>₹{total.toFixed(2)}</strong>
     </div>
   </div>
 ));
@@ -130,14 +130,31 @@ function App() {
   const couponInputRef = useRef(null);
   const emailInputRef = useRef(null);
 
-  // Load Razorpay
+  // ============ INITIALIZATION ============
   useEffect(() => {
+    console.log('🚀 App initialized');
     loadRazorpayScript();
     
     if ('scrollRestoration' in window.history) {
       window.history.scrollRestoration = 'manual';
     }
+
+    // Clear any lingering state
+    return () => {
+      console.log('🧹 Cleanup on unmount');
+    };
   }, []);
+
+  // ============ STATE DEBUG LOGGING ============
+  useEffect(() => {
+    console.log('📊 Current State:', {
+      step,
+      showAdmin,
+      code: code || '(empty)',
+      machineId,
+      cartItems: cart.length
+    });
+  }, [step, showAdmin, code, machineId, cart.length]);
 
   // Check code expiry
   const checkCodeExpiry = useCallback(async (codeToCheck) => {
@@ -193,6 +210,7 @@ function App() {
     }
 
     if (code.toUpperCase() === 'ADMIN9') {
+      console.log('🔐 Admin access granted');
       setShowAdmin(true);
       setError('');
       return;
@@ -210,17 +228,16 @@ function App() {
         const currentTime = Math.floor(Date.now() / 1000);
 
         if (data.status === 'active' && data.expiresAt > currentTime) {
-          // ✅ MARK AS LOGGED IN FOR PI TO DETECT
           await update(sessionRef, {
             isLoggedIn: true,
             loginTime: currentTime
           });
           
-          console.log('✅ Marked as logged in for Pi');
+          console.log('✅ Session validated - Moving to product selection');
           
           setMachineId(data.machineId);
           setSessionExpiresAt(data.expiresAt);
-          loadProducts(data.machineId);
+          await loadProducts(data.machineId);
           setStep('product-selection');
         } else if (data.expiresAt <= currentTime) {
           setError('Code has expired. Please generate a new code from the machine.');
@@ -234,7 +251,7 @@ function App() {
         setCodeExpiresAt(null);
       }
     } catch (err) {
-      console.error('Verification error:', err);
+      console.error('❌ Verification error:', err);
       setError('Connection error. Please try again.');
     }
 
@@ -243,18 +260,27 @@ function App() {
 
   // ============ PRODUCT LOADING ============
   const loadProducts = async (machineId) => {
+    console.log('🔍 Loading products for machine:', machineId);
+    
     try {
       const productsRef = ref(database, `machines/${machineId}/inventory`);
       const snapshot = await get(productsRef);
 
       if (snapshot.exists()) {
         const productsData = snapshot.val();
+        console.log('📦 Found products:', Object.keys(productsData).length);
+        
         const productList = Object.keys(productsData).map(key => ({
           id: key,
           ...productsData[key]
         }));
-        setProducts(productList.filter(p => p.stock > 0));
+        
+        // Filter out products with 0 stock
+        const availableProducts = productList.filter(p => p.stock > 0);
+        console.log('✅ Available products:', availableProducts.length);
+        setProducts(availableProducts);
       } else {
+        console.warn('⚠️ No products found, using defaults');
         setProducts([
           { id: 'product1', name: 'Chips', price: 20, stock: 10, image: '🍟' },
           { id: 'product2', name: 'Cookies', price: 30, stock: 8, image: '🍪' },
@@ -263,7 +289,7 @@ function App() {
         ]);
       }
     } catch (err) {
-      console.error('Error loading products:', err);
+      console.error('❌ Error loading products:', err);
       setError('Failed to load products');
     }
   };
@@ -307,7 +333,8 @@ function App() {
 
   const getTotalPrice = useCallback(() => {
     const subtotal = getSubtotal();
-    return subtotal - couponDiscount;
+    const total = subtotal - couponDiscount;
+    return Math.round(total * 100) / 100;
   }, [getSubtotal, couponDiscount]);
 
   // ============ COUPON MANAGEMENT ============
@@ -384,7 +411,9 @@ function App() {
         return;
       }
       
-      const discount = (getSubtotal() * couponData.discount) / 100;
+      const rawDiscount = (getSubtotal() * couponData.discount) / 100;
+      const discount = Math.round(rawDiscount * 100) / 100;
+      
       setCouponDiscount(discount);
       setAppliedCoupon({
         code: codeToValidate,
@@ -414,7 +443,15 @@ function App() {
   // ============ RAZORPAY PAYMENT ============
   const proceedToPayment = async () => {
     const total = getTotalPrice();
+    const amountInPaise = Math.round(total * 100);
     const itemsList = cart.map(item => `${item.name} x${item.quantity}`).join(', ');
+
+    console.log('💳 Payment initiated:', {
+      subtotal: getSubtotal(),
+      discount: couponDiscount.toFixed(2),
+      total: total.toFixed(2),
+      amountInPaise: amountInPaise
+    });
 
     if (!window.Razorpay) {
       alert('Payment gateway is loading. Please try again in a moment.');
@@ -425,7 +462,7 @@ function App() {
     try {
       const options = {
         key: RAZORPAY_KEY_ID,
-        amount: total * 100,
+        amount: amountInPaise,
         currency: 'INR',
         name: 'Vending Machine',
         description: `Purchase: ${itemsList}`,
@@ -443,7 +480,8 @@ function App() {
         notes: {
           machineId: machineId,
           sessionCode: code,
-          items: itemsList
+          items: itemsList,
+          amount: total.toFixed(2)
         },
         theme: {
           color: '#667eea'
@@ -486,6 +524,10 @@ function App() {
       const newCouponCode = generateCouponCode();
       const newCouponData = await saveCouponToFirebase(newCouponCode, 2);
 
+      const subtotal = Math.round(getSubtotal() * 100) / 100;
+      const discount = Math.round(couponDiscount * 100) / 100;
+      const totalAmount = Math.round(getTotalPrice() * 100) / 100;
+
       const receiptData = {
         transactionId: transactionId,
         razorpayOrderId: paymentResponse.razorpay_order_id || '',
@@ -493,10 +535,10 @@ function App() {
         machineId: machineId,
         code: code,
         items: cart,
-        subtotal: getSubtotal(),
+        subtotal: subtotal,
         couponUsed: appliedCoupon ? appliedCoupon.code : null,
-        couponDiscount: couponDiscount,
-        totalAmount: getTotalPrice(),
+        couponDiscount: discount,
+        totalAmount: totalAmount,
         timestamp: timestamp,
         date: new Date(timestamp).toLocaleString('en-IN'),
         paymentMethod: 'Razorpay',
@@ -573,7 +615,7 @@ function App() {
       };
 
       await update(ref(database, `dispenseQueue/${code}`), dispenseData);
-      console.log('Dispense command sent to Pi');
+      console.log('✅ Dispense command sent to Pi');
     } catch (error) {
       console.error('Error sending dispense command:', error);
     }
@@ -596,7 +638,7 @@ function App() {
           });
         }
       }
-      console.log('Inventory updated');
+      console.log('✅ Inventory updated');
     } catch (error) {
       console.error('Error updating inventory:', error);
     }
@@ -669,8 +711,8 @@ ${receipt?.items.map(item =>
 ).join('\n')}
 
 --------------------------------
-Subtotal: ₹${receipt?.subtotal}
-${receipt?.couponUsed ? `Coupon (${receipt.couponUsed}): -₹${receipt.couponDiscount.toFixed(2)}\n` : ''}Total: ₹${receipt?.totalAmount}
+Subtotal: ₹${receipt?.subtotal.toFixed(2)}
+${receipt?.couponUsed ? `Coupon (${receipt.couponUsed}): -₹${receipt.couponDiscount.toFixed(2)}\n` : ''}Total: ₹${receipt?.totalAmount.toFixed(2)}
 Payment Method: ${receipt?.paymentMethod}
 --------------------------------
 
@@ -694,7 +736,8 @@ Valid until: ${receipt.newCoupon.expiryDate}
 
   // ============ LOGOUT/CANCEL FUNCTIONS ============
   const handleLogout = async () => {
-    // ✅ MARK SESSION AS CANCELLED IF USER WAS LOGGED IN
+    console.log('🔄 Logging out...');
+    
     if (code && step === 'product-selection') {
       try {
         const sessionRef = ref(database, `sessions/${code.toUpperCase()}`);
@@ -702,12 +745,13 @@ Valid until: ${receipt.newCoupon.expiryDate}
           status: 'cancelled',
           cancelledAt: Math.floor(Date.now() / 1000)
         });
-        console.log('✅ Session marked as cancelled for Pi');
+        console.log('✅ Session marked as cancelled');
       } catch (error) {
         console.error('Error marking session as cancelled:', error);
       }
     }
     
+    // Reset all state
     setStep('code-entry');
     setCode('');
     setMachineId(null);
@@ -722,9 +766,12 @@ Valid until: ${receipt.newCoupon.expiryDate}
     setCouponDiscount(0);
     setSessionExpiresAt(null);
     setCodeExpiresAt(null);
+    
+    console.log('✅ State reset to code-entry');
   };
 
   const handleAdminLogout = () => {
+    console.log('🔐 Admin logout');
     setShowAdmin(false);
     setCode('');
     setError('');
@@ -948,7 +995,7 @@ Valid until: ${receipt.newCoupon.expiryDate}
                 className="btn-primary btn-large"
                 disabled={loading}
               >
-                {loading ? 'Processing...' : `Pay ₹${getTotalPrice()} with Razorpay →`}
+                {loading ? 'Processing...' : `Pay ₹${getTotalPrice().toFixed(2)} with Razorpay →`}
               </button>
               <div className="payment-methods">
                 <p>💳 Secure payment via Razorpay</p>
@@ -1017,7 +1064,7 @@ Valid until: ${receipt.newCoupon.expiryDate}
 
           <div className="receipt-row">
             <span>Subtotal:</span>
-            <span className="receipt-value">₹{receipt?.subtotal}</span>
+            <span className="receipt-value">₹{receipt?.subtotal.toFixed(2)}</span>
           </div>
 
           {receipt?.couponUsed && (
@@ -1029,7 +1076,7 @@ Valid until: ${receipt.newCoupon.expiryDate}
 
           <div className="receipt-row receipt-total">
             <span>Total Paid:</span>
-            <span>₹{receipt?.totalAmount}</span>
+            <span>₹{receipt?.totalAmount.toFixed(2)}</span>
           </div>
 
           <div className="receipt-row">
